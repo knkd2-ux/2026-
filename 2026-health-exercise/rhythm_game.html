@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <title>好寶寶訓練班</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+
+  <style>
+    body {
+      margin: 0;
+      background-color: #000;
+      overflow: hidden;
+      font-family: "Arial", sans-serif;
+      color: white;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+    #input_video { display: none; }
+    
+    /* HUD */
+    .hud { position: absolute; font-weight: bold; pointer-events: none; text-shadow: 2px 2px 0 black; z-index: 20; }
+    
+    /* 分數板 */
+    #p1-score { top: 20px; left: 20px; font-size: 30px; color: yellow; }
+    #p2-score { top: 20px; right: 20px; font-size: 30px; color: cyan; }
+    #timer-display { top: 20px; left: 50%; transform: translateX(-50%); font-size: 50px; color: white; }
+    
+    #status { bottom: 10px; left: 50%; transform: translateX(-50%); font-size: 16px; color: #aaa; }
+    #debug-log { bottom: 10px; left: 10px; font-size: 12px; color: #0f0; background: rgba(0,0,0,0.5); pointer-events: none; }
+
+    /* 浮動加分文字 */
+    .score-pop {
+      position: absolute; font-weight: bold; font-size: 26px;
+      animation: floatUp 0.8s forwards; pointer-events: none; z-index: 15;
+    }
+    @keyframes floatUp {
+      0% { opacity: 1; transform: translateY(0); }
+      100% { opacity: 0; transform: translateY(-40px); }
+    }
+
+    #overlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.9);
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center;
+      z-index: 100;
+    }
+    
+    .title { font-size: 50px; color: #0ff; margin-bottom: 20px; }
+    .blink { animation: blink 1s infinite; color: lime; font-size: 30px; }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    #start-btn {
+        display: none; margin-top: 20px; padding: 15px 40px; font-size: 24px;
+        background: lime; color: black; border: none; border-radius: 50px;
+        cursor: pointer; font-weight: bold; pointer-events: auto;
+    }
+
+    /* 觀戰視窗 */
+    .spectator-ui { 
+        display: none;
+        pointer-events: none; z-index: 15;
+    }
+    
+    .cam-p1 {
+        position: absolute; top: 10%; left: 2%;
+        width: 160px; height: 120px;
+        background: black; border: 3px solid yellow;
+        border-radius: 10px; overflow: hidden;
+    }
+    
+    .cam-p2 {
+        position: absolute; bottom: 10%; left: 2%;
+        width: 160px; height: 120px;
+        background: black; border: 3px solid cyan;
+        border-radius: 10px; overflow: hidden;
+    }
+
+    .player-cam img { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+    .cam-label {
+        position: absolute; bottom: 0; width: 100%; background: rgba(0,0,0,0.6);
+        color: white; text-align: center; font-size: 14px; padding: 2px 0;
+    }
+  </style>
+</head>
+<body>
+  <video id="input_video" autoplay playsinline></video>
+  <canvas id="gameCanvas"></canvas>
+
+  <div id="p1-score" class="hud">P1: 0</div>
+  <div id="timer-display" class="hud">60</div>
+  <div id="p2-score" class="hud">P2: 0</div>
+  <div id="status" class="hud">初始化...</div>
+  <div id="debug-log" class="hud">Log...</div>
+
+  <div id="spectator-panel" class="spectator-ui">
+      <div class="player-cam cam-p1">
+          <img id="img-p1">
+          <div class="cam-label" style="color:yellow">P1 (房主)</div>
+      </div>
+      <div class="player-cam cam-p2">
+          <img id="img-p2">
+          <div class="cam-label" style="color:cyan">P2 (對手)</div>
+      </div>
+  </div>
+
+  <div id="overlay">
+    <div class="title">好寶寶訓練班</div>
+    <div id="msg" class="blink">等待連線...</div>
+    <div id="loading" style="color:#ccc; margin-top:10px;">模型載入中...</div>
+    <button id="start-btn" onclick="forceStartGame()">👉 開始遊戲 👈</button>
+    <div id="final-score" style="display:none; font-size: 40px; margin-top: 20px; color: gold; text-align: center; white-space: pre;"></div>
+  </div>
+
+  <script>
+    // ------------------- 基礎設置 -------------------
+    const videoElement = document.getElementById("input_video");
+    const canvasElement = document.getElementById("gameCanvas");
+    const canvasCtx = canvasElement.getContext("2d");
+    const overlay = document.getElementById("overlay");
+    const msgDiv = document.getElementById("msg");
+    const startBtn = document.getElementById("start-btn");
+    const loadingDiv = document.getElementById("loading");
+    const p1ScoreDiv = document.getElementById("p1-score");
+    const p2ScoreDiv = document.getElementById("p2-score");
+    const timerDiv = document.getElementById("timer-display");
+    const debugLog = document.getElementById("debug-log");
+    const finalScoreDiv = document.getElementById("final-score");
+    const statusDiv = document.getElementById("status");
+    const spectatorPanel = document.getElementById("spectator-panel");
+    const imgP1 = document.getElementById("img-p1");
+    const imgP2 = document.getElementById("img-p2");
+
+    function log(txt) { console.log(txt); debugLog.innerText = txt; }
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const MODE = urlParams.get("mode") || "single";
+    const PIN = urlParams.get("pin");
+
+    let screenW = window.innerWidth;
+    let screenH = window.innerHeight;
+    function resize() { 
+        screenW = window.innerWidth; 
+        screenH = window.innerHeight; 
+        canvasElement.width = screenW; 
+        canvasElement.height = screenH; 
+    }
+    window.onresize = resize; resize();
+
+    statusDiv.innerText = `模式: ${MODE.toUpperCase()} | PIN: ${PIN||'-'}`;
+    
+    if (MODE === "spectate") {
+        spectatorPanel.style.display = "block";
+        p1ScoreDiv.style.top = "10%"; p1ScoreDiv.style.left = "20%";
+        p2ScoreDiv.style.top = "60%"; p2ScoreDiv.style.left = "20%";
+        p2ScoreDiv.style.right = "auto";
+    }
+
+    let gameState = "LOADING";
+    const GAME_DURATION = 60;
+    let startTime = 0;
+    let remainingTime = GAME_DURATION;
+    let lastFrameTime = performance.now();
+    let frameCount = 0;
+
+    let p1Score = 0;
+    let p2Score = 0;
+    let opponentScore = 0;
+
+    const inputs = {
+      tongueOut: false,
+      leftHandUp: false,
+      rightHandUp: false,
+      hipY: 0,
+      hasJumped: false,
+    };
+    let prevLeftHand = false;
+    let prevRightHand = false;
+    let jumpCooldown = 0;
+
+    let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // ------------------- 打鼓遊戲（Taiko） -------------------
+    const RhythmGame = {
+      notes: [],
+      score: 0,
+      reset: function () {
+        this.notes = [];
+        this.score = 0;
+      },
+      update: function (h, w) {
+        // ★★★ 鼓譜產生：L / R / LR 同時 出現 ★★★
+        if (frameCount % 10 === 0) {
+          const r = Math.random();
+          if (r < 1/3) {
+            // 只出左
+            this.notes.push({ side: "L", y: -50, hit: false });
+          } else if (r < 2/3) {
+            // 只出右
+            this.notes.push({ side: "R", y: -50, hit: false });
+          } else {
+            // 同時出左右
+            this.notes.push({ side: "L", y: -50, hit: false });
+            this.notes.push({ side: "R", y: -50, hit: false });
+          }
+        }
+
+        const hitLineY = h * 0.8;
+
+        for (let i = this.notes.length - 1; i >= 0; i--) {
+          const n = this.notes[i]; 
+          n.y += 10;
+
+          // 判定打擊
+          if (!n.hit && Math.abs(n.y - hitLineY) < 70) {
+            let hit = false;
+            if (n.side === "L" && inputs.rightHandUp && !prevRightHand) hit = true;
+            if (n.side === "R" && inputs.leftHandUp && !prevLeftHand) hit = true;
+            if (hit) {
+                n.hit = true;
+                this.score += 200;
+                playSound("drum");
+                createFloatingText(n.side === "L" ? w * 0.35 : w * 0.65, hitLineY, "+200", "lime");
+            }
+          }
+
+          // Miss
+          if (n.y > h && !n.hit) {
+              this.score -= 50;
+              playSound("miss");
+              createFloatingText(n.side === "L" ? w * 0.35 : w * 0.65, h - 60, "-50", "red");
+              this.notes.splice(i, 1);
+          }
+        }
+      },
+      draw: function (ctx, xOffset, w, h) {
+        ctx.save();
+        ctx.translate(xOffset, 0);
+        const hitY = h * 0.8;
+        const lX = w * 0.35;
+        const rX = w * 0.65;
+
+        // 判定鼓面（優化風格）
+        function drawDrumPad(x, active) {
+          // 外圈
+          ctx.beginPath();
+          ctx.arc(x, hitY, 40, 0, Math.PI * 2);
+          ctx.lineWidth = 4;
+          ctx.strokeStyle = "white";
+          ctx.stroke();
+
+          // 內圈
+          ctx.beginPath();
+          ctx.arc(x, hitY, 30, 0, Math.PI * 2);
+          ctx.fillStyle = active ? "rgba(250,250,210,0.8)" : "rgba(15,23,42,0.7)";
+          ctx.fill();
+
+          // 高光
+          ctx.beginPath();
+          ctx.arc(x - 8, hitY - 8, 10, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(255,255,255,0.2)";
+          ctx.fill();
+        }
+
+        drawDrumPad(lX, inputs.rightHandUp);
+        drawDrumPad(rX, inputs.leftHandUp);
+
+        // 下落音符
+        this.notes.forEach(n => {
+          if (n.hit) return;
+          const nx = n.side === "L" ? lX : rX;
+          ctx.beginPath();
+          ctx.arc(nx, n.y, 24, 0, Math.PI * 2);
+          ctx.fillStyle = n.side === "L" ? "#ef4444" : "#3b82f6";
+          ctx.fill();
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = "white";
+          ctx.stroke();
+        });
+
+        ctx.restore();
+      }
+    };
+
+    // ------------------- WebSocket 連線 -------------------
+    let ws = null;
+
+    function initNetwork() {
+        if (MODE === 'single') {
+            msgDiv.innerText = "做動作 或 按鈕開始";
+            startBtn.style.display = "block";
+            gameState = "WAIT";
+            return;
+        }
+
+        const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+        const host = window.location.host;
+        const wsUrl = `${protocol}${host}/ws`;
+
+        log(`連線 Server: ${wsUrl}`);
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            log("伺服器連線成功！");
+            ws.send(JSON.stringify({ type: 'JOIN', pin: PIN, mode: MODE }));
+
+            if (MODE === 'host') {
+                msgDiv.innerText = "等待玩家加入...";
+                msgDiv.style.color = "yellow";
+                setInterval(() => {
+                    if (gameState === "WAIT") sendData({ type: 'LOBBY_HEARTBEAT' });
+                }, 1000);
+            } else {
+                msgDiv.innerText = "已連線，等待房主...";
+                msgDiv.style.color = "cyan";
+                gameState = "WAIT";
+            }
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            if (MODE !== 'host' && data.type !== 'PING') {
+                if (msgDiv.innerText.includes("連線成功")) {
+                    msgDiv.innerText = "已連上房主！等待開始...";
+                    msgDiv.style.color = "lime";
+                }
+            }
+
+            if (data.type === 'PLAYER_JOINED') {
+                msgDiv.innerText = "P2 已加入！請開始";
+                msgDiv.style.color = "lime";
+                if(MODE === 'host') startBtn.style.display = "block";
+            }
+
+            if (data.type === 'START') {
+                startLocalGame();
+            }
+
+            if (data.type === 'UPDATE') {
+                if (gameState === "WAIT" && MODE !== 'host' && data.gameRunning) {
+                    startLocalGame();
+                }
+
+                if (MODE === 'host') {
+                    opponentScore = data.p2_score || 0;
+                    if(data.p2_face) imgP2.src = data.p2_face;
+                } else if (MODE === 'join') {
+                    opponentScore = data.p1_score || 0;
+                    if(data.p1_face) imgP1.src = data.p1_face;
+                    if(data.time) remainingTime = data.time;
+                } else if (MODE === 'spectate') {
+                    p1Score = data.p1_score || 0;
+                    p2Score = data.p2_score || 0;
+                    if(data.p1_face) imgP1.src = data.p1_face;
+                    if(data.p2_face) imgP2.src = data.p2_face;
+                    remainingTime = data.time || 60;
+                    
+                    if (gameState !== "PLAY" && data.gameRunning) {
+                        gameState = "PLAY";
+                        overlay.style.display = "none";
+                        finalScoreDiv.style.display = "none";
+                        RhythmGame.reset();
+                    }
+                }
+            }
+
+            if (data.type === 'GAME_OVER') endGame();
+        };
+
+        ws.onclose = () => { log("斷線"); alert("連線中斷"); };
+    }
+
+    function sendData(obj) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    }
+
+    function compressImage(videoElem) {
+        const c = document.createElement("canvas"); c.width = 100; c.height = 75;
+        c.getContext("2d").drawImage(videoElem, 0, 0, 100, 75);
+        return c.toDataURL("image/jpeg", 0.4);
+    }
+
+    // ------------------- 遊戲流程 -------------------
+    function forceStartGame() {
+        if (MODE === 'single' || MODE === 'host') {
+            sendData({ type: "START" });
+            startLocalGame();
+        }
+    }
+
+    function startLocalGame() {
+        overlay.style.display = "none";
+        finalScoreDiv.style.display = "none";
+        gameState = "PLAY";
+        startTime = Date.now();
+        remainingTime = GAME_DURATION;
+        lastFrameTime = performance.now();
+        
+        RhythmGame.reset();
+        if(audioCtx) audioCtx.resume();
+    }
+
+    function endGame() {
+        gameState = "OVER";
+        overlay.style.display = "flex";
+        msgDiv.innerText = "時間到！"; msgDiv.style.color = "white";
+        finalScoreDiv.style.display = "block";
+        startBtn.style.display = "none";
+
+        let s1 = (MODE === 'host' ? getTotalScore() : opponentScore);
+        let s2 = (MODE === 'join' ? getTotalScore() : opponentScore);
+        if (MODE === 'spectate') { s1 = p1Score; s2 = p2Score; }
+
+        let result = "";
+        if (MODE !== 'single') {
+            if (s1 > s2) result = "P1 獲勝！";
+            else if (s2 > s1) result = "P2 獲勝！";
+            else result = "平手！";
+            finalScoreDiv.innerText = `${result}\nP1: ${s1} | P2: ${s2}`;
+        } else {
+            finalScoreDiv.innerText = `總分: ${s1}`;
+        }
+
+        setTimeout(() => {
+            msgDiv.innerText = "按鈕重來";
+            msgDiv.style.color = "lime";
+            if(MODE === 'host' || MODE === 'single') startBtn.style.display = "block";
+            gameState = "WAIT";
+        }, 3000);
+    }
+
+    // ★★★ 現在的總分就是「打鼓」分數 ★★★
+    function getTotalScore() {
+        return RhythmGame.score;
+    }
+
+    // ------------------- 更新與繪製 -------------------
+    function updateGame() {
+        if (gameState !== "PLAY") return;
+
+        if (MODE === 'host' || MODE === 'single') {
+            let elapsed = (Date.now() - startTime) / 1000;
+            remainingTime = Math.max(0, GAME_DURATION - elapsed);
+            if (remainingTime <= 0) {
+                endGame();
+                if (MODE === 'host') sendData({ type: 'GAME_OVER' });
+                return;
+            }
+        }
+
+        const now = performance.now();
+        let dt = (now - lastFrameTime) / 1000;
+        if(dt > 0.1) dt = 0.1;
+        lastFrameTime = now;
+        frameCount++;
+
+        // 只更新打鼓邏輯
+        RhythmGame.update(screenH, screenW);
+
+        prevLeftHand = inputs.leftHandUp;
+        prevRightHand = inputs.rightHandUp;
+
+        if (MODE !== 'spectate' && Date.now() % 3 === 0) {
+            const v = document.getElementById("input_video");
+            let face = (v.readyState >= 2) ? compressImage(v) : "";
+            let myScore = getTotalScore();
+            
+            if (MODE === "host") {
+                sendData({
+                    type: "UPDATE",
+                    p1_score: myScore, p1_face: face,
+                    gameRunning: true,
+                    p2_score: opponentScore, p2_face: imgP2.src,
+                    time: remainingTime
+                });
+            } else if (MODE === "join") {
+                sendData({ type: "UPDATE", p2_score: myScore, p2_face: face });
+            }
+        }
+    }
+
+    // 只畫打鼓內容
+    function drawGameContent(ctx, w, h) {
+        RhythmGame.draw(ctx, 0, w, h);
+    }
+
+    function draw() {
+        canvasCtx.clearRect(0, 0, screenW, screenH);
+
+        if (MODE === 'spectate') {
+            canvasCtx.fillStyle = "black";
+            canvasCtx.fillRect(0,0,screenW,screenH);
+
+            // 上半部 P1
+            canvasCtx.save();
+            canvasCtx.translate(screenW * 0.25, 0);
+            canvasCtx.scale(0.5, 0.5);
+            drawGameContent(canvasCtx, screenW, screenH);
+            canvasCtx.restore();
+
+            canvasCtx.fillStyle = "white";
+            canvasCtx.fillRect(0, screenH/2 - 2, screenW, 4);
+
+            // 下半部 P2
+            canvasCtx.save();
+            canvasCtx.translate(screenW * 0.25, screenH * 0.5);
+            canvasCtx.scale(0.5, 0.5);
+            drawGameContent(canvasCtx, screenW, screenH);
+            canvasCtx.restore();
+
+            p1ScoreDiv.innerText = `P1: ${p1Score}`;
+            p2ScoreDiv.innerText = `P2: ${p2Score}`;
+            timerDiv.innerText = Math.ceil(remainingTime);
+            return;
+        }
+
+        // 玩家模式背景：純鏡頭畫面
+        canvasCtx.save();
+        canvasCtx.translate(screenW, 0);
+        canvasCtx.scale(-1, 1);
+        canvasCtx.drawImage(videoElement, 0, 0, screenW, screenH);
+        canvasCtx.restore();
+
+        drawGameContent(canvasCtx, screenW, screenH);
+
+        if (MODE === 'host') {
+            p1ScoreDiv.innerText = `P1: ${getTotalScore()}`;
+            p2ScoreDiv.innerText = `P2: ${opponentScore}`;
+        } else if (MODE === 'join') {
+            p1ScoreDiv.innerText = `P1: ${opponentScore}`;
+            p2ScoreDiv.innerText = `P2: ${getTotalScore()}`;
+        } else {
+            p1ScoreDiv.innerText = `Score: ${getTotalScore()}`;
+            p2ScoreDiv.innerText = "";
+        }
+        timerDiv.innerText = Math.ceil(remainingTime);
+        if(remainingTime < 10) timerDiv.style.color = "red"; else timerDiv.style.color = "white";
+    }
+
+    function loop() {
+        updateGame();
+        draw();
+        requestAnimationFrame(loop);
+    }
+    loop();
+
+    // ------------------- 輔助功能 -------------------
+    function createFloatingText(x, y, text, color) {
+      if (MODE === 'spectate') return;
+      const el = document.createElement("div");
+      el.className = "score-pop";
+      el.style.left = x + "px"; el.style.top = y + "px"; el.style.color = color; el.textContent = text;
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), 800);
+    }
+
+    function playSound(type) {
+      if (MODE === 'spectate' || !audioCtx) return;
+      
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      const now = audioCtx.currentTime;
+      if (type === "crash" || type === "miss") {
+        osc.type = "sawtooth"; osc.frequency.setValueAtTime(180, now); osc.frequency.linearRampToValueAtTime(80, now + 0.25);
+        gain.gain.setValueAtTime(0.25, now); gain.gain.linearRampToValueAtTime(0, now + 0.25);
+      } else if (type === "score" || type === "drum") {
+        osc.type = "sine"; osc.frequency.setValueAtTime(type === "score" ? 880 : 440, now);
+        gain.gain.setValueAtTime(0.2, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.12);
+      } else if (type === "jump") {
+        osc.type = "triangle"; osc.frequency.setValueAtTime(200, now); osc.frequency.linearRampToValueAtTime(400, now + 0.1);
+        gain.gain.setValueAtTime(0.2, now); gain.gain.linearRampToValueAtTime(0, now + 0.15);
+      }
+      osc.start(now); osc.stop(now + 0.35);
+    }
+
+    // ------------------- MediaPipe -------------------
+    const holistic = new Holistic({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}` });
+    holistic.setOptions({ modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+
+    holistic.onResults((results) => {
+      if (gameState === "LOADING") {
+        loadingDiv.style.display = "none";
+        gameState = "WAIT";
+        if (MODE === "single") msgDiv.innerText = "做動作 或 按鈕開始";
+        if (MODE !== "single") initNetwork();
+      }
+
+      if (results.faceLandmarks) {
+        const u = results.faceLandmarks[13], l = results.faceLandmarks[14];
+        inputs.tongueOut = Math.abs(l.y - u.y) > 0.02;
+      }
+
+      if (results.poseLandmarks) {
+        const rw = results.poseLandmarks[16], rs = results.poseLandmarks[12];
+        const lw = results.poseLandmarks[15], ls = results.poseLandmarks[11];
+        inputs.leftHandUp = rw && rs && rw.y < rs.y - 0.2;
+        inputs.rightHandUp = lw && ls && lw.y < ls.y - 0.2;
+
+        const hipAvg = (results.poseLandmarks[23].y + results.poseLandmarks[24].y) / 2;
+        if (inputs.hipY !== 0 && jumpCooldown === 0) {
+          if (inputs.hipY - hipAvg > 0.08) { inputs.hasJumped = true; jumpCooldown = 30; }
+        }
+        inputs.hipY = inputs.hipY * 0.6 + hipAvg * 0.4;
+        if (jumpCooldown > 0) jumpCooldown--;
+
+        if (gameState === "WAIT" && (inputs.tongueOut || inputs.leftHandUp || inputs.rightHandUp || inputs.hasJumped)) {
+            if (MODE === "single") forceStartGame();
+            else if (MODE === "host") forceStartGame();
+        }
+      }
+    });
+
+    const camera = new Camera(videoElement, {
+      onFrame: async () => { await holistic.send({ image: videoElement }); },
+      width: 640, height: 480,
+    });
+    camera.start();
+  </script>
+</body>
+</html>
+

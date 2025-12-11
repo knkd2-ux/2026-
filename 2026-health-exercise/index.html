@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2026新式國民健康操</title>
+    <style>
+        body { margin: 0; background: #1a1a1a; font-family: 'Arial', sans-serif; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+        .container { text-align: center; width: 100%; max-width: 800px; padding: 20px; }
+        h1 { font-size: 48px; color: #00ffff; text-shadow: 0 0 15px #00ffff; margin-bottom: 40px; }
+        
+        .step { display: none; animation: fadeIn 0.5s; }
+        .step.active { display: block; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+
+        .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .btn {
+            background: #333; border: 2px solid #555; color: white;
+            padding: 25px; font-size: 22px; border-radius: 15px; cursor: pointer;
+            transition: 0.3s; box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        .btn:hover { background: #444; border-color: #00ffff; transform: scale(1.05); color: #00ffff; }
+        
+        .btn-game { border-left: 8px solid; text-align: left; padding-left: 30px;}
+        .g1 { border-color: yellow; }
+        .g2 { border-color: lime; }
+        .g3 { border-color: cyan; }
+        .g4 { border-color: magenta; }
+
+        .pin-box { margin: 30px 0; }
+        .pin-display { font-size: 60px; color: lime; letter-spacing: 5px; font-weight: bold; background: #000; padding: 10px 30px; border-radius: 10px; display: inline-block;}
+        input.pin-input { 
+            font-size: 40px; padding: 10px; text-align: center; letter-spacing: 5px; 
+            width: 200px; background: #000; border: 2px solid #00ffff; color: white; border-radius: 10px; outline: none;
+        }
+        .back-btn { margin-top: 40px; color: #888; cursor: pointer; text-decoration: underline; font-size: 18px;}
+        .back-btn:hover { color: white; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🎮 2026新式國民健康操</h1>
+
+    <div id="step-1" class="step active">
+        <h2>請選擇一款遊戲</h2>
+        <div class="btn-grid">
+            <div class="btn btn-game g1" onclick="selectGame('bird_game.html')">🐦 東尼速成班</div>
+            <div class="btn btn-game g2" onclick="selectGame('rhythm_game.html')">🥁 好寶寶訓練班</div>
+            <div class="btn btn-game g3" onclick="selectGame('game_split.html')">🧠 2026新式國民健康操</div>
+            <div class="btn btn-game g4" onclick="selectGame('tower.html')">🏗️ 大岩壁</div>
+        </div>
+    </div>
+
+    <div id="step-2" class="step">
+        <h2>選擇遊玩模式</h2>
+        <div class="btn-grid">
+            <div class="btn" onclick="selectMode('single')">👤 單人練習</div>
+            <div class="btn" onclick="selectMode('host')">🏠 創建房間 (雙人)</div>
+            <div class="btn" onclick="selectMode('join')">🔗 加入房間 (雙人)</div>
+            <div class="btn" onclick="selectMode('spectate')">👀 觀戰模式</div>
+        </div>
+        <div class="back-btn" onclick="goToStep(1)">⬅ 回上一頁</div>
+    </div>
+
+    <div id="step-host" class="step">
+        <h2>等待對手連線...</h2>
+        <p>請將此 PIN 碼告訴你的朋友</p>
+        <div class="pin-box">
+            <div class="pin-display" id="host-pin">----</div>
+        </div>
+        <div class="btn" style="background: #008800; border-color: #00ff00;" onclick="startGame()">開始遊戲</div>
+        <div class="back-btn" onclick="goToStep(2)">⬅ 回上一頁</div>
+    </div>
+
+    <div id="step-join" class="step">
+        <h2 id="join-title">加入房間</h2>
+        <p>請輸入房主的 PIN 碼</p>
+        <div class="pin-box">
+            <input type="number" id="join-pin" class="pin-input" placeholder="1234">
+        </div>
+        <div class="btn" style="background: #0088ff; border-color: #00ffff;" onclick="joinGame()">連線並開始</div>
+        <div class="back-btn" onclick="goToStep(2)">⬅ 回上一頁</div>
+    </div>
+</div>
+
+<script>
+    let selectedGame = "";
+    let selectedMode = "";
+    let generatedPin = "";
+
+    function goToStep(n) {
+        document.querySelectorAll('.step').forEach(el => el.classList.remove('active'));
+        if(n===3) { // Host
+            document.getElementById('step-host').classList.add('active');
+            generatedPin = Math.floor(1000 + Math.random() * 9000); 
+            document.getElementById('host-pin').innerText = generatedPin;
+        } else if(n===4) { // Join
+            document.getElementById('step-join').classList.add('active');
+            document.getElementById('join-title').innerText = selectedMode === 'spectate' ? "觀戰模式" : "加入對戰";
+        } else {
+            document.getElementById('step-' + n).classList.add('active');
+        }
+    }
+
+    function selectGame(gameFile) {
+        selectedGame = gameFile;
+        goToStep(2);
+    }
+
+    function selectMode(mode) {
+        selectedMode = mode;
+        if (mode === 'single') startGame();
+        else if (mode === 'host') goToStep(3);
+        else goToStep(4);
+    }
+
+    // ★★★ 關鍵修改：加上 &t=時間戳記，強制瀏覽器抓新檔案，不準用快取 ★★★
+    function startGame() {
+        let timestamp = new Date().getTime();
+        let url = `${selectedGame}?mode=${selectedMode}&t=${timestamp}`;
+        if (selectedMode === 'host') url += `&pin=${generatedPin}`;
+        window.location.href = url;
+    }
+
+    function joinGame() {
+        const inputPin = document.getElementById('join-pin').value;
+        if (inputPin.length !== 4) { alert("請輸入 4 位數 PIN 碼"); return; }
+        
+        let timestamp = new Date().getTime(); // 強制更新
+        window.location.href = `${selectedGame}?mode=${selectedMode}&pin=${inputPin}&t=${timestamp}`;
+    }
+</script>
+
+</body>
+</html>
+

@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <title>2026新式國民健康操</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+
+  <style>
+    body {
+      margin: 0;
+      background-color: #000;
+      overflow: hidden;
+      font-family: "Arial", sans-serif;
+      color: white;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+    #input_video { display: none; }
+    
+    .hud { position: absolute; font-weight: bold; pointer-events: none; text-shadow: 2px 2px 0 black; z-index: 20; }
+    
+    #p1-score { top: 20px; left: 20px; font-size: 30px; color: yellow; }
+    #p2-score { top: 20px; right: 20px; font-size: 30px; color: cyan; }
+    #timer-display { top: 20px; left: 50%; transform: translateX(-50%); font-size: 50px; color: white; }
+    
+    #status { bottom: 10px; left: 50%; transform: translateX(-50%); font-size: 16px; color: #aaa; }
+    #debug-log { bottom: 10px; left: 10px; font-size: 12px; color: #0f0; background: rgba(0,0,0,0.5); pointer-events: none; }
+
+    .score-pop {
+      position: absolute; font-weight: bold; font-size: 26px;
+      animation: floatUp 0.8s forwards; pointer-events: none; z-index: 15;
+    }
+    @keyframes floatUp {
+      0% { opacity: 1; transform: translateY(0); }
+      100% { opacity: 0; transform: translateY(-40px); }
+    }
+
+    #overlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.9);
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center;
+      z-index: 100;
+    }
+    
+    .title { font-size: 50px; color: #0ff; margin-bottom: 20px; }
+    .blink { animation: blink 1s infinite; color: lime; font-size: 30px; }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    #start-btn {
+        display: none; margin-top: 20px; padding: 15px 40px; font-size: 24px;
+        background: lime; color: black; border: none; border-radius: 50px;
+        cursor: pointer; font-weight: bold; pointer-events: auto;
+    }
+
+    .spectator-ui { 
+        display: none;
+        pointer-events: none; z-index: 15;
+    }
+    
+    .cam-p1 {
+        position: absolute; top: 10%; left: 2%;
+        width: 160px; height: 120px;
+        background: black; border: 3px solid yellow;
+        border-radius: 10px; overflow: hidden;
+    }
+    
+    .cam-p2 {
+        position: absolute; bottom: 10%; left: 2%;
+        width: 160px; height: 120px;
+        background: black; border: 3px solid cyan;
+        border-radius: 10px; overflow: hidden;
+    }
+
+    .player-cam img { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+    .cam-label {
+        position: absolute; bottom: 0; width: 100%; background: rgba(0,0,0,0.6);
+        color: white; text-align: center; font-size: 14px; padding: 2px 0;
+    }
+  </style>
+</head>
+<body>
+  <video id="input_video" autoplay playsinline></video>
+  <canvas id="gameCanvas"></canvas>
+
+  <div id="p1-score" class="hud">P1: 0</div>
+  <div id="timer-display" class="hud">60</div>
+  <div id="p2-score" class="hud">P2: 0</div>
+  <div id="status" class="hud">初始化...</div>
+  <div id="debug-log" class="hud">Log...</div>
+
+  <div id="spectator-panel" class="spectator-ui">
+      <div class="player-cam cam-p1">
+          <img id="img-p1">
+          <div class="cam-label" style="color:yellow">P1 (房主)</div>
+      </div>
+      <div class="player-cam cam-p2">
+          <img id="img-p2">
+          <div class="cam-label" style="color:cyan">P2 (對手)</div>
+      </div>
+  </div>
+
+  <div id="overlay">
+    <div class="title">2026新式國民健康操</div>
+    <div id="msg" class="blink">等待連線...</div>
+    <div id="loading" style="color:#ccc; margin-top:10px;">模型載入中...</div>
+    <button id="start-btn" onclick="forceStartGame()">👉 開始遊戲 👈</button>
+    <div id="final-score" style="display:none; font-size: 40px; margin-top: 20px; color: gold; text-align: center; white-space: pre;"></div>
+  </div>
+
+  <script>
+    const videoElement = document.getElementById("input_video");
+    const canvasElement = document.getElementById("gameCanvas");
+    const canvasCtx = canvasElement.getContext("2d");
+    const overlay = document.getElementById("overlay");
+    const msgDiv = document.getElementById("msg");
+    const startBtn = document.getElementById("start-btn");
+    const loadingDiv = document.getElementById("loading");
+    const p1ScoreDiv = document.getElementById("p1-score");
+    const p2ScoreDiv = document.getElementById("p2-score");
+    const timerDiv = document.getElementById("timer-display");
+    const debugLog = document.getElementById("debug-log");
+    const finalScoreDiv = document.getElementById("final-score");
+    const statusDiv = document.getElementById("status");
+    const spectatorPanel = document.getElementById("spectator-panel");
+    const imgP1 = document.getElementById("img-p1");
+    const imgP2 = document.getElementById("img-p2");
+
+    const customBirdImg = new Image();
+    customBirdImg.src = "bird.png";
+    let birdImgLoaded = false;
+    customBirdImg.onload = () => { birdImgLoaded = true; };
+
+    function log(txt) { console.log(txt); debugLog.innerText = txt; }
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const MODE = urlParams.get("mode") || "single";
+    const PIN = urlParams.get("pin");
+
+    let screenW = window.innerWidth;
+    let screenH = window.innerHeight;
+    function resize() { 
+        screenW = window.innerWidth; 
+        screenH = window.innerHeight; 
+        canvasElement.width = screenW; 
+        canvasElement.height = screenH; 
+    }
+    window.onresize = resize; resize();
+
+    statusDiv.innerText = `模式: ${MODE.toUpperCase()} | PIN: ${PIN||'-'}`;
+    
+    if (MODE === "spectate") {
+        spectatorPanel.style.display = "block";
+        p1ScoreDiv.style.top = "10%"; p1ScoreDiv.style.left = "20%";
+        p2ScoreDiv.style.top = "60%"; p2ScoreDiv.style.left = "20%";
+        p2ScoreDiv.style.right = "auto";
+    }
+
+    let gameState = "LOADING";
+    const GAME_DURATION = 60;
+    let startTime = 0;
+    let remainingTime = GAME_DURATION;
+    let lastFrameTime = performance.now();
+    let frameCount = 0;
+
+    let p1Score = 0;
+    let p2Score = 0;
+    let opponentScore = 0;
+
+    const inputs = {
+      tongueOut: false,
+      leftHandUp: false,
+      rightHandUp: false,
+      hipY: 0,
+      hasJumped: false,
+    };
+    let prevLeftHand = false;
+    let prevRightHand = false;
+    let jumpCooldown = 0;
+
+    let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    const PIPE_WIDTH = 80;
+
+    function drawStyledPipe(ctx, p, canvasHeight) {
+      const topY = 0;
+      const topH = p.topH;
+      const bottomY = p.topH + p.gap;
+      const bottomH = canvasHeight - bottomY;
+
+      let gradTop = ctx.createLinearGradient(p.x, topY, p.x + PIPE_WIDTH, topY);
+      gradTop.addColorStop(0, "#14532d");
+      gradTop.addColorStop(0.5, "#22c55e");
+      gradTop.addColorStop(1, "#15803d");
+      ctx.fillStyle = gradTop;
+      ctx.fillRect(p.x, topY, PIPE_WIDTH, topH);
+
+      ctx.fillStyle = "#16a34a";
+      ctx.fillRect(p.x - 4, topH - 25, PIPE_WIDTH + 8, 25);
+      ctx.strokeStyle = "#0f172a";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(p.x - 4, topH - 25, PIPE_WIDTH + 8, 25);
+
+      ctx.strokeStyle = "#0f172a";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(p.x, topY, PIPE_WIDTH, topH);
+
+      let gradBottom = ctx.createLinearGradient(p.x, bottomY, p.x + PIPE_WIDTH, bottomY);
+      gradBottom.addColorStop(0, "#14532d");
+      gradBottom.addColorStop(0.5, "#22c55e");
+      gradBottom.addColorStop(1, "#15803d");
+      ctx.fillStyle = gradBottom;
+      ctx.fillRect(p.x, bottomY, PIPE_WIDTH, bottomH);
+
+      ctx.fillStyle = "#16a34a";
+      ctx.fillRect(p.x - 4, bottomY, PIPE_WIDTH + 8, 25);
+      ctx.strokeStyle = "#0f172a";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(p.x - 4, bottomY, PIPE_WIDTH + 8, 25);
+
+      ctx.strokeStyle = "#0f172a";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(p.x, bottomY, PIPE_WIDTH, bottomH);
+    }
+
+    function drawStyledBird(ctx, x, y, color, label) {
+      if (birdImgLoaded) {
+        const size = 40;
+        ctx.drawImage(customBirdImg, x - size/2, y - size/2, size, size);
+      } else {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(1.1, 1);
+        ctx.beginPath();
+        ctx.arc(0, 0, 22, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "#0f172a";
+        ctx.stroke();
+        ctx.restore();
+
+        ctx.save();
+        ctx.translate(x - 8, y + 2);
+        ctx.rotate(-0.6);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 10, 16, 0, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(250, 250, 210, 0.9)";
+        ctx.fill();
+        ctx.restore();
+
+        ctx.beginPath();
+        ctx.arc(x + 10, y - 8, 5, 0, Math.PI * 2);
+        ctx.fillStyle = "white";
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(x + 11, y - 9, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = "black";
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.moveTo(x + 18, y - 2);
+        ctx.lineTo(x + 30, y + 2);
+        ctx.lineTo(x + 18, y + 6);
+        ctx.closePath();
+        ctx.fillStyle = "#f97316";
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#9a3412";
+        ctx.stroke();
+      }
+
+      if (label) {
+        ctx.fillStyle = "white";
+        ctx.font = "16px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(label, x, y - 30);
+      }
+    }
+
+    const BirdGame = {
+      score: 0, y: 0, vel: 0, pipes: [], gravity: 0.7, invincibleTimer: 0,
+      reset: function (w, h) {
+        this.score = 0; this.pipes = []; this.vel = 0; this.y = h / 2; this.invincibleTimer = 0;
+      },
+      update: function (w, h) {
+        if (this.invincibleTimer > 0) this.invincibleTimer--;
+        if (inputs.tongueOut) this.vel -= 1.5; else this.vel += this.gravity;
+        this.vel = Math.max(-12, Math.min(18, this.vel));
+        this.y += this.vel;
+        if (this.y < 0) this.y = 0; if (this.y > h) this.y = h;
+
+        const BIRD_X = w * 0.25;
+        
+        if (frameCount % 60 === 0) {
+          this.pipes.push({
+            x: w + PIPE_WIDTH,
+            topH: Math.random() * (h - 290) + 50,
+            gap: 190,
+            passed: false,
+            hit: false,
+            scored: false
+          });
+        }
+
+        for (let i = this.pipes.length - 1; i >= 0; i--) {
+          const p = this.pipes[i];
+          p.x -= 7;
+          
+          if (!p.hit && !p.scored && Math.abs(p.x - BIRD_X) < 40) {
+             if (this.y < p.topH || this.y > p.topH + p.gap) {
+                 this.score -= 50; p.hit = true; playSound("crash");
+                 createFloatingText(BIRD_X, this.y, "-50", "red");
+                 this.invincibleTimer = 30;
+             }
+          }
+          if (!p.passed && p.x + PIPE_WIDTH < BIRD_X) {
+            p.passed = true;
+            if (!p.hit) {
+              this.score += 100; p.scored = true; playSound("score");
+              createFloatingText(BIRD_X, this.y - 40, "+100", "#22c55e");
+            }
+          }
+          if (p.x + PIPE_WIDTH < -50) this.pipes.splice(i, 1);
+        }
+      },
+      draw: function (ctx, xOffset, w, h) {
+        ctx.save();
+        ctx.translate(xOffset, 0);
+
+        this.pipes.forEach(p => drawStyledPipe(ctx, p, h));
+
+        if (Math.floor(this.invincibleTimer / 4) % 2 === 0) {
+          const BIRD_X = w * 0.25;
+          drawStyledBird(ctx, BIRD_X, this.y, inputs.tongueOut ? "orange" : "yellow", "");
+        }
+
+        ctx.restore();
+      }
+    };
+
+    const RhythmGame = {
+      notes: [], score: 0,
+      reset: function () { this.notes = []; this.score = 0; },
+      update: function (h, w) {
+        if (frameCount % 30 === 0)
+          this.notes.push({ side: Math.random() > 0.5 ? "L" : "R", y: -50, hit: false });
+
+        const hitLineY = h * 0.8;
+
+        for (let i = this.notes.length - 1; i >= 0; i--) {
+          const n = this.notes[i]; 
+          n.y += 10;
+
+          if (!n.hit && Math.abs(n.y - hitLineY) < 70) {
+            let hit = false;
+            if (n.side === "L" && inputs.rightHandUp && !prevRightHand) hit = true;
+            if (n.side === "R" && inputs.leftHandUp && !prevLeftHand) hit = true;
+            if (hit) {
+                n.hit = true;
+                this.score += 200;
+                playSound("drum");
+                createFloatingText(n.side === "L" ? w * 0.45 : w * 0.75, hitLineY, "+200", "lime");
+            }
+          }
+
+          if (n.y > h && !n.hit) {
+              this.score -= 50;
+              playSound("miss");
+              createFloatingText(n.side === "L" ? w * 0.45 : w * 0.75, h - 60, "-50", "red");
+              this.notes.splice(i, 1);
+          }
+        }
+      },
+      draw: function (ctx, xOffset, w, h) {
+        ctx.save();
+        ctx.translate(xOffset, 0);
+        const hitY = h * 0.8;
+        const lX = w * 0.45;
+        const rX = w * 0.75;
+
+        function drawDrumPad(x, active) {
+          ctx.beginPath();
+          ctx.arc(x, hitY, 40, 0, Math.PI * 2);
+          ctx.lineWidth = 4;
+          ctx.strokeStyle = "white";
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(x, hitY, 30, 0, Math.PI * 2);
+          ctx.fillStyle = active ? "rgba(250,250,210,0.8)" : "rgba(15,23,42,0.7)";
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.arc(x - 8, hitY - 8, 10, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(255,255,255,0.2)";
+          ctx.fill();
+        }
+
+        drawDrumPad(lX, inputs.rightHandUp);
+        drawDrumPad(rX, inputs.leftHandUp);
+
+        this.notes.forEach(n => {
+          if (n.hit) return;
+          const nx = n.side === "L" ? lX : rX;
+          ctx.beginPath();
+          ctx.arc(nx, n.y, 24, 0, Math.PI * 2);
+          ctx.fillStyle = n.side === "L" ? "#ef4444" : "#3b82f6";
+          ctx.fill();
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = "white";
+          ctx.stroke();
+        });
+
+        ctx.restore();
+      }
+    };
+
+    const StackGame = {
+      blocks: [], hanging: null, score: 0, swingStart: 0, cameraOffset: 0,
+      reset: function (w, h) {
+        this.blocks = [{
+          x: w / 2,
+          y: h - 70,
+          w: 160,
+          h: 50,
+          color: [230, 230, 230]
+        }];
+        this.score = 0;
+        this.cameraOffset = 0;
+        this.spawnHanging(w);
+      },
+      spawnHanging: function (w) {
+        const baseW = this.blocks[this.blocks.length - 1].w;
+        this.hanging = {
+          x: w / 2,
+          y: 100,
+          w: baseW,
+          h: 50,
+          color: [
+            200 + Math.random() * 40,
+            200 + Math.random() * 40,
+            200 + Math.random() * 40
+          ],
+          falling: false,
+          vy: 0
+        };
+        this.swingStart = Date.now();
+      },
+      update: function (dt, w, h) {
+        if (!this.hanging) return;
+
+        this.cameraOffset += (Math.max(0, (this.blocks.length - 4) * 60) - this.cameraOffset) * 0.1;
+        
+        if (!this.hanging.falling) {
+            this.hanging.x = w / 2 + Math.sin((Date.now() - this.swingStart) / 600) * (w / 2 - 60);
+            if (inputs.hasJumped) {
+              this.hanging.falling = true;
+              inputs.hasJumped = false;
+              playSound("jump");
+            }
+        } else {
+            this.hanging.y += 15;
+            const top = this.blocks[this.blocks.length - 1];
+            if (this.hanging.y + this.hanging.h >= top.y) {
+                this.hanging.y = top.y - this.hanging.h;
+                const dist = Math.abs(this.hanging.x - top.x);
+                if (dist < top.w) {
+                    this.hanging.w = Math.max(40, this.hanging.w - dist);
+                    if(this.hanging.x < top.x) this.hanging.x += dist / 2;
+                    else this.hanging.x -= dist / 2;
+
+                    this.blocks.push(this.hanging);
+                    this.score += 100;
+                    playSound("score");
+                    createFloatingText(w - 80, h / 2, "+100", "lime");
+                    this.spawnHanging(w);
+                } else {
+                    this.score -= 50;
+                    playSound("crash");
+                    createFloatingText(w - 80, h / 2, "-50", "red");
+                    this.spawnHanging(w);
+                }
+            }
+        }
+      },
+      drawHouse: function(ctx, b, offsetY) {
+        const bodyWidth = b.w;
+        const bodyHeight = b.h * 0.7;
+        const roofHeight = b.h * 0.8;
+
+        const bodyX = b.x - bodyWidth / 2;
+        const bodyY = b.y + offsetY;
+
+        ctx.fillStyle = `rgb(${b.color[0]},${b.color[1]},${b.color[2]})`;
+        ctx.fillRect(bodyX, bodyY, bodyWidth, bodyHeight);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#111827";
+        ctx.strokeRect(bodyX, bodyY, bodyWidth, bodyHeight);
+
+        ctx.beginPath();
+        ctx.moveTo(b.x, bodyY - roofHeight * 0.5);
+        ctx.lineTo(bodyX - 5, bodyY);
+        ctx.lineTo(bodyX + bodyWidth + 5, bodyY);
+        ctx.closePath();
+        ctx.fillStyle = "#b91c1c";
+        ctx.fill();
+        ctx.strokeStyle = "#7f1d1d";
+        ctx.stroke();
+
+        const doorWidth = bodyWidth * 0.18;
+        const doorHeight = bodyHeight * 0.55;
+        const doorX = b.x - doorWidth * 0.5;
+        const doorY = bodyY + bodyHeight - doorHeight;
+        ctx.fillStyle = "#4b5563";
+        ctx.fillRect(doorX, doorY, doorWidth, doorHeight);
+        ctx.strokeStyle = "#111827";
+        ctx.strokeRect(doorX, doorY, doorWidth, doorHeight);
+        ctx.beginPath();
+        ctx.arc(doorX + doorWidth * 0.8, doorY + doorHeight * 0.55, 2, 0, Math.PI * 2);
+        ctx.fillStyle = "#e5e7eb";
+        ctx.fill();
+
+        const winSize = bodyWidth * 0.18;
+        const winY = bodyY + bodyHeight * 0.25;
+        const winX1 = bodyX + bodyWidth * 0.22;
+        const winX2 = bodyX + bodyWidth * 0.6;
+        ctx.fillStyle = "#bfdbfe";
+        ctx.strokeStyle = "#1d4ed8";
+        ctx.lineWidth = 2;
+
+        ctx.fillRect(winX1, winY, winSize, winSize);
+        ctx.strokeRect(winX1, winY, winSize, winSize);
+
+        ctx.fillRect(winX2, winY, winSize, winSize);
+        ctx.strokeRect(winX2, winY, winSize, winSize);
+      },
+      draw: function (ctx, xOffset, w, h) {
+        ctx.save();
+        ctx.translate(xOffset, 0);
+
+        const all = [...this.blocks];
+        if (this.hanging) all.push(this.hanging);
+
+        all.forEach(b => {
+          this.drawHouse(ctx, b, this.cameraOffset);
+        });
+
+        ctx.restore();
+      }
+    };
+
+    let ws = null;
+
+    function initNetwork() {
+        if (MODE === 'single') {
+            msgDiv.innerText = "做動作 或 按鈕開始";
+            startBtn.style.display = "block";
+            gameState = "WAIT";
+            return;
+        }
+
+        const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+        const host = window.location.host;
+        const wsUrl = `${protocol}${host}/ws`;
+
+        log(`連線 Server: ${wsUrl}`);
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            log("伺服器連線成功！");
+            ws.send(JSON.stringify({ type: 'JOIN', pin: PIN, mode: MODE }));
+
+            if (MODE === 'host') {
+                msgDiv.innerText = "等待玩家加入...";
+                msgDiv.style.color = "yellow";
+                setInterval(() => {
+                    if (gameState === "WAIT") sendData({ type: 'LOBBY_HEARTBEAT' });
+                }, 1000);
+            } else {
+                msgDiv.innerText = "已連線,等待房主...";
+                msgDiv.style.color = "cyan";
+                gameState = "WAIT";
+            }
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            if (MODE !== 'host' && data.type !== 'PING') {
+                if (msgDiv.innerText.includes("連線成功")) {
+                    msgDiv.innerText = "已連上房主,等待開始...";
+                    msgDiv.style.color = "lime";
+                }
+            }
+
+            if (data.type === 'PLAYER_JOINED') {
+                msgDiv.innerText = "P2 已加入,請開始";
+                msgDiv.style.color = "lime";
+                if(MODE === 'host') startBtn.style.display = "block";
+            }
+
+            if (data.type === 'START') {
+                startLocalGame();
+            }
+
+            if (data.type === 'UPDATE') {
+                if (gameState === "WAIT" && MODE !== 'host' && data.gameRunning) {
+                    startLocalGame();
+                }
+
+                if (MODE === 'host') {
+                    opponentScore = data.p2_score || 0;
+                    if(data.p2_face) imgP2.src = data.p2_face;
+                } else if (MODE === 'join') {
+                    opponentScore = data.p1_score || 0;
+                    if(data.p1_face) imgP1.src = data.p1_face;
+                    if(data.time) remainingTime = data.time;
+                } else if (MODE === 'spectate') {
+                    p1Score = data.p1_score || 0;
+                    p2Score = data.p2_score || 0;
+                    if(data.p1_face) imgP1.src = data.p1_face;
+                    if(data.p2_face) imgP2.src = data.p2_face;
+                    remainingTime = data.time || 60;
+                    
+                    // 🔥 新增：同步遊戲狀態
+                    if (data.gameState) {
+                        if (data.gameState.bird) {
+                            BirdGame.y = data.gameState.bird.y;
+                            BirdGame.pipes = data.gameState.bird.pipes;
+                            BirdGame.invincibleTimer = data.gameState.bird.invincibleTimer;
+                        }
+                        if (data.gameState.rhythm) {
+                            RhythmGame.notes = data.gameState.rhythm.notes;
+                        }
+                        if (data.gameState.stack) {
+                            StackGame.blocks = data.gameState.stack.blocks;
+                            StackGame.hanging = data.gameState.stack.hanging;
+                            StackGame.cameraOffset = data.gameState.stack.cameraOffset;
+                        }
+                    }
+                    
+                    if (gameState !== "PLAY" && data.gameRunning) {
+                        gameState = "PLAY";
+                        overlay.style.display = "none";
+                        finalScoreDiv.style.display = "none";
+
+                        const splitX = screenW * 0.66;
+                        BirdGame.reset(splitX, screenH);
+                        RhythmGame.reset();
+                        StackGame.reset(screenW - splitX, screenH);
+                    }
+                }
+            }
+
+            if (data.type === 'GAME_OVER') endGame();
+        };
+
+        ws.onclose = () => { log("斷線"); alert("連線中斷"); };
+    }
+
+    function sendData(obj) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    }
+
+    function compressImage(videoElem) {
+        const c = document.createElement("canvas"); c.width = 100; c.height = 75;
+        c.getContext("2d").drawImage(videoElem, 0, 0, 100, 75);
+        return c.toDataURL("image/jpeg", 0.4);
+    }
+
+    function forceStartGame() {
+        if (MODE === 'single' || MODE === 'host') {
+            sendData({ type: "START" });
+            startLocalGame();
+        }
+    }
+
+    function startLocalGame() {
+        overlay.style.display = "none";
+        finalScoreDiv.style.display = "none";
+        gameState = "PLAY";
+        startTime = Date.now();
+        remainingTime = GAME_DURATION;
+        lastFrameTime = performance.now();
+        
+        const splitX = screenW * 0.66;
+        BirdGame.reset(splitX, screenH);
+        RhythmGame.reset();
+        StackGame.reset(screenW - splitX, screenH);
+        if(audioCtx) audioCtx.resume();
+    }
+
+    function endGame() {
+        gameState = "OVER";
+        overlay.style.display = "flex";
+        msgDiv.innerText = "時間到!"; msgDiv.style.color = "white";
+        finalScoreDiv.style.display = "block";
+        startBtn.style.display = "none";
+
+        let s1 = (MODE === 'host' ? getTotalScore() : opponentScore);
+        let s2 = (MODE === 'join' ? getTotalScore() : opponentScore);
+        if (MODE === 'spectate') { s1 = p1Score; s2 = p2Score; }
+
+        let result = "";
+        if (MODE !== 'single') {
+            if (s1 > s2) result = "P1 獲勝!";
+            else if (s2 > s1) result = "P2 獲勝!";
+            else result = "平手!";
+            finalScoreDiv.innerText = `${result}\nP1: ${s1} | P2: ${s2}`;
+        } else {
+            finalScoreDiv.innerText = `總分: ${s1}`;
+        }
+
+        setTimeout(() => {
+            msgDiv.innerText = "按鈕重來";
+            msgDiv.style.color = "lime";
+            if(MODE === 'host' || MODE === 'single') startBtn.style.display = "block";
+            gameState = "WAIT";
+        }, 3000);
+    }
+
+    function getTotalScore() {
+        return BirdGame.score + RhythmGame.score + StackGame.score;
+    }
+
+    function updateGame() {
+        if (gameState !== "PLAY") return;
+
+        if (MODE === 'host' || MODE === 'single') {
+            let elapsed = (Date.now() - startTime) / 1000;
+            remainingTime = Math.max(0, GAME_DURATION - elapsed);
+            if (remainingTime <= 0) {
+                endGame();
+                if (MODE === 'host') sendData({ type: 'GAME_OVER' });
+                return;
+            }
+        }
+
+        const now = performance.now();
+        let dt = (now - lastFrameTime) / 1000;
+        if(dt > 0.1) dt = 0.1;
+        lastFrameTime = now;
+        frameCount++;
+
+        const splitX = screenW * 0.66;
+        
+        BirdGame.update(splitX, screenH);
+        RhythmGame.update(screenH, splitX);
+        StackGame.update(dt, screenW - splitX, screenH);
+
+        prevLeftHand = inputs.leftHandUp;
+        prevRightHand = inputs.rightHandUp;
+
+        if (MODE !== 'spectate' && frameCount % 3 === 0) {
+            const v = document.getElementById("input_video");
+            let face = (v.readyState >= 2) ? compressImage(v) : "";
+            let myScore = getTotalScore();
+            
+            if (MODE === "host") {
+                sendData({
+                    type: "UPDATE",
+                    p1_score: myScore, 
+                    p1_face: face,
+                    gameRunning: true,
+                    p2_score: opponentScore, 
+                    p2_face: imgP2.src,
+                    time: remainingTime,
+                    // 🔥 新增：發送遊戲狀態
+                    gameState: {
+                        bird: {
+                            y: BirdGame.y,
+                            pipes: BirdGame.pipes,
+                            invincibleTimer: BirdGame.invincibleTimer
+                        },
+                        rhythm: {
+                            notes: RhythmGame.notes
+                        },
+                        stack: {
+                            blocks: StackGame.blocks,
+                            hanging: StackGame.hanging,
+                            cameraOffset: StackGame.cameraOffset
+                        }
+                    }
+                });
+            } else if (MODE === "join") {
+                sendData({ type: "UPDATE", p2_score: myScore, p2_face: face });
+            }
+        }
+    }
+
+    function drawGameContent(ctx, w, h) {
+        const splitX = w * 0.66;
+        BirdGame.draw(ctx, 0, splitX, h);
+        RhythmGame.draw(ctx, 0, splitX, h);
+        StackGame.draw(ctx, splitX, w - splitX, h);
+
+        ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(splitX, 0); ctx.lineTo(splitX, h); ctx.stroke();
+    }
+
+    function draw() {
+        canvasCtx.clearRect(0, 0, screenW, screenH);
+
+        if (MODE === 'spectate') {
+            canvasCtx.fillStyle = "black";
+            canvasCtx.fillRect(0,0,screenW,screenH);
+
+            canvasCtx.save();
+            canvasCtx.translate(screenW * 0.25, 0);
+            canvasCtx.scale(0.5, 0.5);
+            drawGameContent(canvasCtx, screenW, screenH);
+            canvasCtx.restore();
+
+            canvasCtx.fillStyle = "white";
+            canvasCtx.fillRect(0, screenH/2 - 2, screenW, 4);
+
+            canvasCtx.save();
+            canvasCtx.translate(screenW * 0.25, screenH * 0.5);
+            canvasCtx.scale(0.5, 0.5);
+            drawGameContent(canvasCtx, screenW, screenH);
+            canvasCtx.restore();
+
+            p1ScoreDiv.innerText = `P1: ${p1Score}`;
+            p2ScoreDiv.innerText = `P2: ${p2Score}`;
+            timerDiv.innerText = Math.ceil(remainingTime);
+            return;
+        }
+
+        canvasCtx.save();
+        canvasCtx.translate(screenW, 0);
+        canvasCtx.scale(-1, 1);
+        canvasCtx.drawImage(videoElement, 0, 0, screenW, screenH);
+        canvasCtx.restore();
+
+        drawGameContent(canvasCtx, screenW, screenH);
+
+        if (MODE === 'host') {
+            p1ScoreDiv.innerText = `P1: ${getTotalScore()}`;
+            p2ScoreDiv.innerText = `P2: ${opponentScore}`;
+        } else if (MODE === 'join') {
+            p1ScoreDiv.innerText = `P1: ${opponentScore}`;
+            p2ScoreDiv.innerText = `P2: ${getTotalScore()}`;
+        } else {
+            p1ScoreDiv.innerText = `Score: ${getTotalScore()}`;
+            p2ScoreDiv.innerText = "";
+        }
+        timerDiv.innerText = Math.ceil(remainingTime);
+        if(remainingTime < 10) timerDiv.style.color = "red"; else timerDiv.style.color = "white";
+    }
+
+    function loop() {
+        updateGame();
+        draw();
+        requestAnimationFrame(loop);
+    }
+    loop();
+
+    function createFloatingText(x, y, text, color) {
+      if (MODE === 'spectate') return;
+      const el = document.createElement("div");
+      el.className = "score-pop";
+      el.style.left = x + "px"; el.style.top = y + "px"; el.style.color = color; el.textContent = text;
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), 800);
+    }
+
+    function playSound(type) {
+      if (MODE === 'spectate' || !audioCtx) return;
+      
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      const now = audioCtx.currentTime;
+      if (type === "crash" || type === "miss") {
+        osc.type = "sawtooth"; osc.frequency.setValueAtTime(180, now); osc.frequency.linearRampToValueAtTime(80, now + 0.25);
+        gain.gain.setValueAtTime(0.25, now); gain.gain.linearRampToValueAtTime(0, now + 0.25);
+      } else if (type === "score" || type === "drum") {
+        osc.type = "sine"; osc.frequency.setValueAtTime(type === "score" ? 880 : 440, now);
+        gain.gain.setValueAtTime(0.2, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.12);
+      } else if (type === "jump") {
+        osc.type = "triangle"; osc.frequency.setValueAtTime(200, now); osc.frequency.linearRampToValueAtTime(400, now + 0.1);
+        gain.gain.setValueAtTime(0.2, now); gain.gain.linearRampToValueAtTime(0, now + 0.15);
+      }
+      osc.start(now); osc.stop(now + 0.35);
+    }
+
+    const holistic = new Holistic({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}` });
+    holistic.setOptions({ modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+
+    holistic.onResults((results) => {
+      if (gameState === "LOADING") {
+        loadingDiv.style.display = "none";
+        gameState = "WAIT";
+        if (MODE === "single") msgDiv.innerText = "做動作 或 按鈕開始";
+        if (MODE !== "single") initNetwork();
+      }
+
+      if (results.faceLandmarks) {
+        const u = results.faceLandmarks[13], l = results.faceLandmarks[14];
+        inputs.tongueOut = Math.abs(l.y - u.y) > 0.02;
+      }
+
+      if (results.poseLandmarks) {
+        const rw = results.poseLandmarks[16], rs = results.poseLandmarks[12];
+        const lw = results.poseLandmarks[15], ls = results.poseLandmarks[11];
+        inputs.leftHandUp = rw && rs && rw.y < rs.y - 0.2;
+        inputs.rightHandUp = lw && ls && lw.y < ls.y - 0.2;
+
+        const hipAvg = (results.poseLandmarks[23].y + results.poseLandmarks[24].y) / 2;
+        if (inputs.hipY !== 0 && jumpCooldown === 0) {
+          if (inputs.hipY - hipAvg > 0.08) { inputs.hasJumped = true; jumpCooldown = 30; }
+        }
+        inputs.hipY = inputs.hipY * 0.6 + hipAvg * 0.4;
+        if (jumpCooldown > 0) jumpCooldown--;
+
+        if (gameState === "WAIT" && (inputs.tongueOut || inputs.leftHandUp || inputs.rightHandUp || inputs.hasJumped)) {
+            if (MODE === "single") forceStartGame();
+            else if (MODE === "host") forceStartGame();
+        }
+      }
+    });
+
+    const camera = new Camera(videoElement, {
+      onFrame: async () => { await holistic.send({ image: videoElement }); },
+      width: 640, height: 480,
+    });
+    camera.start();
+  </script>
+</body>
+</html>

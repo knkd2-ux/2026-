@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>東尼速成班</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+
+    <style>
+        body { 
+            margin: 0; 
+            background: #222; 
+            overflow: hidden; 
+            font-family: Arial; 
+            color: white;            /* ⬅ 新增：預設文字為白色 */
+        }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .hud { position: absolute; color: white; font-weight: bold; pointer-events: none; text-shadow: 2px 2px 0 black; }
+        #score-board { top: 20px; left: 20px; font-size: 40px; }
+        #timer-board { top: 20px; left: 50%; transform: translateX(-50%); font-size: 50px; color: yellow; }
+        #status { top: 20px; right: 20px; font-size: 20px; color: #aaa; }
+        #debug-log { bottom: 10px; left: 10px; font-size: 14px; color: #0f0; background: rgba(0,0,0,0.5); pointer-events: none; max-width: 300px; }
+
+        #overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column; justify-content: center;
+            align-items: center; background: rgba(0,0,0,0.85); z-index: 10;
+        }
+        #input_video { position: absolute; opacity: 0; pointer-events: none; width: 1px; height: 1px; }
+        
+        #start-btn {
+            display: none; margin-top: 20px; padding: 15px 40px; font-size: 24px;
+            background: lime; color: white;   /* ⬅ 原本是 black，改成 white */
+            border: none; border-radius: 50px;
+            cursor: pointer; font-weight: bold; pointer-events: auto;
+        }
+        
+        .spectator-ui {
+            display: none; position: absolute; bottom: 20px; width: 100%; 
+            justify-content: center; gap: 20px; pointer-events: none;
+        }
+        .player-cam {
+            width: 160px; height: 120px; background: black; border: 3px solid white;
+            border-radius: 10px; overflow: hidden;
+        }
+        .player-cam img { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        .p1-border { border-color: yellow; }
+        .p2-border { border-color: cyan; }
+    </style>
+</head>
+
+<body>
+<video id="input_video" autoplay playsinline></video>
+<canvas id="output_canvas"></canvas>
+
+<div id="score-board" class="hud">SCORE: 0</div>
+<div id="timer-board" class="hud">60</div>
+<div id="status" class="hud">初始化...</div>
+<div id="debug-log" class="hud">Init...</div>
+
+<div id="spectator-panel" class="spectator-ui">
+    <div class="player-cam p1-border"><img id="img-p1"><div style="text-align:center;color:yellow;">P1</div></div>
+    <div class="player-cam p2-border"><img id="img-p2"><div style="text-align:center;color:cyan;">P2</div></div>
+</div>
+
+<div id="overlay">
+    <h1 style="font-size: 50px;">東尼速成班</h1>
+    
+    <div id="msg" class="blink" style="font-size: 30px; margin-top: 20px;">等待連線...</div>
+    <button id="start-btn" onclick="forceStartGame()">👉 開始遊戲 👈</button>
+    <div id="loading" style="font-size: 22px; margin-top: 20px; color: #ccc;"></div>
+    <div id="final-score" style="display:none; font-size: 40px; margin-top: 20px; color: cyan; text-align: center; white-space: pre;"></div>
+</div>
+
+<script>
+// ================================
+// 1. 初始化
+// ================================
+const canvas = document.getElementById("output_canvas");
+const ctx = canvas.getContext("2d");
+const overlay = document.getElementById("overlay");
+const msgDiv = document.getElementById("msg");
+const loadingDiv = document.getElementById("loading");
+const startBtn = document.getElementById("start-btn");
+const scoreDiv = document.getElementById("score-board");
+const timerDiv = document.getElementById("timer-board");
+const statusDiv = document.getElementById("status");
+const debugLog = document.getElementById("debug-log");
+const finalScoreDiv = document.getElementById("final-score");
+const spectatorPanel = document.getElementById("spectator-panel");
+const imgP1 = document.getElementById("img-p1");
+const imgP2 = document.getElementById("img-p2");
+
+function log(txt) { console.log(txt); debugLog.innerText = txt; }
+
+const urlParams = new URLSearchParams(window.location.search);
+const MODE = urlParams.get("mode") || "single";
+const PIN = urlParams.get("pin");
+
+let width, height;
+function resize() { width=innerWidth; height=innerHeight; canvas.width=width; canvas.height=height; }
+window.onresize=resize; resize();
+
+let gameState = "LOADING";
+let isTongueOut = false;
+const TONGUE_THRESHOLD = 0.025;
+
+let p1 = { y: height/2, score: 0, face: "" };
+let p2 = { y: height/2, score: 0, face: "" };
+let pipes = [];
+let birdVel = 0;
+let pipeTimer = 0;
+
+// === 調整水管參數：寬度、速度、間距 ===
+const PIPE_WIDTH = 80;
+const PIPE_SPEED = 12;     // 原本 6 → 加快移動
+const PIPE_GAP   = 280;   // 間距維持，難度適中
+
+let lastHitTime = 0;
+const GAME_DURATION = 60;
+let startTime = 0;
+let remainingTime = GAME_DURATION;
+
+statusDiv.innerText = `模式: ${MODE.toUpperCase()} | PIN: ${PIN||'-'}`;
+if (MODE === "spectate") spectatorPanel.style.display = "flex";
+
+// ======================================
+// 2. WebSocket 連線 (Server Relay)
+// ======================================
+let ws = null;
+
+function initNetwork() {
+    if (MODE === 'single') {
+        msgDiv.innerText = "吐舌頭 或 按鈕開始";
+        startBtn.style.display = "block";
+        gameState = "WAIT";
+        return;
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const host = window.location.host; 
+    const wsUrl = `${protocol}${host}/ws`; 
+
+    log(`連線 Server: ${wsUrl}`);
+    
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+        log("伺服器連線成功！");
+        ws.send(JSON.stringify({ type: 'JOIN', pin: PIN, mode: MODE }));
+
+        if (MODE === 'host') {
+            msgDiv.innerText = "等待玩家加入...";
+            msgDiv.style.color = "yellow";
+            startHostHeartbeat();
+        } else {
+            msgDiv.innerText = "連線成功，等待房主訊號...";
+            msgDiv.style.color = "cyan";
+            gameState = "WAIT";
+        }
+    };
+
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (MODE !== 'host' && data.type !== 'PING') {
+            if (msgDiv.innerText.includes("連線成功")) {
+                msgDiv.innerText = "已連上房主！等待開始...";
+                msgDiv.style.color = "lime";
+            }
+        }
+
+        if (data.type === 'PLAYER_JOINED') {
+            msgDiv.innerText = "P2 已加入！吐舌頭 或 按鈕開始";
+            msgDiv.style.color = "lime";
+            if(MODE === 'host') startBtn.style.display = "block";
+        }
+
+        if (data.type === 'START') {
+            pipes = data.pipes;
+            startGameLocal();
+        }
+
+        if (data.type === 'UPDATE') {
+            if (gameState === "WAIT" && MODE !== 'host' && data.pipes && data.pipes.length > 0) {
+                startGameLocal();
+            }
+
+            if (MODE === 'host') {
+                p2.y = data.p2_y; p2.score = data.p2_score; p2.face = data.p2_face;
+            } else if (MODE === 'join') {
+                p1.y = data.p1_y; p1.score = data.p1_score; 
+                if(data.pipes) pipes = data.pipes;
+                if(data.time) remainingTime = data.time;
+            } else if (MODE === 'spectate') {
+                p1 = { y: data.p1_y, score: data.p1_score, face: data.p1_face };
+                p2 = { y: data.p2_y, score: data.p2_score, face: data.p2_face };
+                pipes = data.pipes;
+                remainingTime = data.time;
+                if(p1.face) imgP1.src = p1.face;
+                if(p2.face) imgP2.src = p2.face;
+                if(gameState !== "PLAY" && gameState !== "OVER") startGameLocal();
+                if(remainingTime <= 0) endGame();
+            }
+        }
+
+        if (data.type === 'GAME_OVER') endGame();
+    };
+
+    ws.onclose = () => { log("伺服器斷線"); alert("連線中斷"); };
+    ws.onerror = (e) => { log("連線錯誤"); console.error(e); };
+}
+
+function startHostHeartbeat() {
+    setInterval(() => {
+        if (MODE === 'host' && gameState === 'WAIT') {
+            sendData({ type: 'UPDATE', p1_y: p1.y, p1_score: 0, p1_face: "", pipes: [], time: 60 });
+        }
+    }, 1000);
+}
+
+function sendData(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+    }
+}
+
+function compressImage(videoElem) {
+    const c = document.createElement("canvas"); c.width = 100; c.height = 75;
+    c.getContext("2d").drawImage(videoElem, 0, 0, 100, 75);
+    return c.toDataURL("image/jpeg", 0.4);
+}
+
+// ======================================
+// 3. 遊戲邏輯
+// ======================================
+function forceStartGame() {
+    if (MODE === 'single' || MODE === 'host') {
+        triggerStartGame();
+    }
+}
+
+function triggerStartGame() {
+    pipes = [];
+    pipes.push({ x: width, topH: Math.random() * (height - 350) + 50 });
+    sendData({ type: "START", pipes });
+    startGameLocal();
+}
+
+function startGameLocal() {
+    gameState = "PLAY";
+    overlay.style.display = "none";
+    finalScoreDiv.style.display = "none";
+    p1.y = height/2; p1.score = 0; birdVel = 0;
+    p2.y = height/2; p2.score = 0;
+    pipeTimer = 0; lastHitTime = 0;
+    startTime = Date.now();
+    remainingTime = GAME_DURATION;
+}
+
+function endGame() {
+    gameState = "OVER";
+    overlay.style.display = "flex";
+    msgDiv.innerText = "時間到！"; msgDiv.style.color = "white";
+    finalScoreDiv.style.display = "block";
+    startBtn.style.display = "none";
+    
+    if (MODE === 'single') finalScoreDiv.innerText = `總分: ${p1.score}`;
+    else {
+        let win = "";
+        if (p1.score > p2.score) win = "P1 獲勝！";
+        else if (p2.score > p1.score) win = "P2 獲勝！";
+        else win = "平手！";
+        finalScoreDiv.innerText = `${win}\nP1: ${p1.score} | P2: ${p2.score}`;
+    }
+    
+    setTimeout(() => {
+        msgDiv.innerText = "吐舌頭 或 按鈕重來";
+        msgDiv.style.color = "lime";
+        gameState = "WAIT";
+        if (MODE === 'host' || MODE === 'single') startBtn.style.display = "block";
+    }, 3000);
+}
+
+function update() {
+    if (gameState !== "PLAY") return;
+
+    if (MODE === 'host' || MODE === 'single') {
+        let elapsed = (Date.now() - startTime) / 1000;
+        remainingTime = Math.max(0, GAME_DURATION - elapsed);
+        if (remainingTime <= 0) {
+            endGame();
+            if (MODE === 'host') sendData({ type: 'GAME_OVER' });
+            return;
+        }
+    }
+
+    if (MODE !== "spectate") {
+        if (isTongueOut) birdVel -= 0.9; else birdVel += 0.6;
+        birdVel = Math.max(-10, Math.min(10, birdVel));
+        let myY = (MODE === "join") ? p2.y : p1.y;
+        myY += birdVel; myY = Math.max(0, Math.min(height, myY));
+        if (MODE === "join") p2.y = myY; else p1.y = myY;
+    }
+
+    // 產生水管：間隔縮短 → 更頻繁
+    if (MODE !== "join") { 
+        pipeTimer++;
+        if (pipeTimer > 30) { // 原本 90 → 60
+            pipes.push({ x: width, topH: Math.random() * (height - 350) + 50 });
+            pipeTimer = 0;
+        }
+        for (let i = pipes.length - 1; i >= 0; i--) {
+            pipes[i].x -= PIPE_SPEED;
+            if (pipes[i].x < -PIPE_WIDTH - 20) pipes.splice(i, 1);
+        }
+    } else {
+        for (let p of pipes) p.x -= PIPE_SPEED;
+    }
+
+    if (MODE !== "spectate") {
+        let myY = (MODE === "join") ? p2.y : p1.y;
+        let bx = width / 2, by = myY, r = 20;
+        let hit = false;
+        for (let p of pipes) {
+            if (bx + r > p.x && bx - r < p.x + PIPE_WIDTH &&
+                (by - r < p.topH || by + r > p.topH + PIPE_GAP)) {
+                hit = true;
+            }
+            if (!p.passed && p.x < width/2 - PIPE_WIDTH/2) {
+                if (MODE === "join") p2.score++;
+                else p1.score++;
+                p.passed = true;
+            }
+        }
+        if (hit && Date.now() - lastHitTime > 1000) {
+            if (MODE === "join") p2.score = Math.max(0, p2.score - 5);
+            else p1.score = Math.max(0, p1.score - 5);
+            lastHitTime = Date.now();
+        }
+    }
+
+    if (Date.now() % 3 === 0) {
+        const v = document.getElementById("input_video");
+        let face = (v.readyState >= 2) ? compressImage(v) : "";
+        if (MODE === "host") {
+            sendData({
+                type: "UPDATE",
+                p1_y: p1.y, p1_score: p1.score, p1_face: face,
+                p2_y: p2.y, p2_score: p2.score, p2_face: p2.face,
+                pipes: pipes, time: remainingTime
+            });
+        } else if (MODE === "join") {
+            sendData({ type: "UPDATE", p2_y: p2.y, p2_score: p2.score, p2_face: face });
+        }
+    }
+}
+
+function drawPipes() {
+    for (let p of pipes) {
+        const topY = 0;
+        const topH = p.topH;
+        const bottomY = p.topH + PIPE_GAP;
+        const bottomH = height - bottomY;
+
+        let gradTop = ctx.createLinearGradient(p.x, topY, p.x + PIPE_WIDTH, topY);
+        gradTop.addColorStop(0, "#14532d");
+        gradTop.addColorStop(0.5, "#22c55e");
+        gradTop.addColorStop(1, "#15803d");
+        ctx.fillStyle = gradTop;
+        ctx.fillRect(p.x, topY, PIPE_WIDTH, topH);
+
+        ctx.fillStyle = "#16a34a";
+        ctx.fillRect(p.x - 4, topH - 25, PIPE_WIDTH + 8, 25);
+        ctx.strokeStyle = "#0f172a";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(p.x - 4, topH - 25, PIPE_WIDTH + 8, 25);
+
+        ctx.strokeStyle = "#0f172a";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(p.x, topY, PIPE_WIDTH, topH);
+
+        let gradBottom = ctx.createLinearGradient(p.x, bottomY, p.x + PIPE_WIDTH, bottomY);
+        gradBottom.addColorStop(0, "#14532d");
+        gradBottom.addColorStop(0.5, "#22c55e");
+        gradBottom.addColorStop(1, "#15803d");
+        ctx.fillStyle = gradBottom;
+        ctx.fillRect(p.x, bottomY, PIPE_WIDTH, bottomH);
+
+        ctx.fillStyle = "#16a34a";
+        ctx.fillRect(p.x - 4, bottomY, PIPE_WIDTH + 8, 25);
+        ctx.strokeStyle = "#0f172a";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(p.x - 4, bottomY, PIPE_WIDTH + 8, 25);
+
+        ctx.strokeStyle = "#0f172a";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(p.x, bottomY, PIPE_WIDTH, bottomH);
+    }
+}
+
+function drawBird(x, y, color, label) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(1.1, 1);
+    ctx.beginPath();
+    ctx.arc(0, 0, 22, 0, Math.PI*2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#0f172a";
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    ctx.translate(x - 8, y + 2);
+    ctx.rotate(-0.6);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 10, 16, 0, 0, Math.PI*2);
+    ctx.fillStyle = "rgba(250, 250, 210, 0.9)";
+    ctx.fill();
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.arc(x + 10, y - 8, 5, 0, Math.PI*2);
+    ctx.fillStyle = "white";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + 11, y - 9, 2.5, 0, Math.PI*2);
+    ctx.fillStyle = "black";
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(x + 18, y - 2);
+    ctx.lineTo(x + 30, y + 2);
+    ctx.lineTo(x + 18, y + 6);
+    ctx.closePath();
+    ctx.fillStyle = "#f97316";
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#9a3412";
+    ctx.stroke();
+
+    ctx.fillStyle = "white";
+    ctx.font = "16px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText(label, x, y - 30);
+}
+
+function draw() {
+    ctx.fillStyle = "#222"; 
+    ctx.fillRect(0, 0, width, height);
+    
+    if (MODE !== "spectate") {
+        const v = document.getElementById("input_video");
+        if (v.readyState >= 2) {
+            ctx.save(); 
+            ctx.translate(width, 0); 
+            ctx.scale(-1, 1); 
+            ctx.globalAlpha = 0.4;
+            ctx.drawImage(v, 0, 0, width, height); 
+            ctx.restore();
+        }
+    }
+
+    timerDiv.innerText = Math.ceil(remainingTime);
+    timerDiv.style.color = (remainingTime < 10) ? "red" : "yellow";
+
+    if (gameState !== "PLAY") return;
+
+    drawPipes();
+
+    let isInvincible = (Date.now() - lastHitTime < 1000);
+
+    if (MODE !== "join") {
+        if (MODE === "spectate" || !isInvincible || Math.floor(Date.now()/100)%2===0)
+            drawBird(width/2, p1.y, "yellow", "P1");
+    } else {
+        ctx.globalAlpha = 0.5; 
+        drawBird(width/2, p1.y, "yellow", "Host"); 
+        ctx.globalAlpha = 1;
+    }
+
+    if (MODE !== "single") {
+        let alpha = (MODE === "host") ? 0.5 : 1.0;
+        ctx.globalAlpha = alpha;
+        drawBird(width/2, p2.y, "cyan", MODE === "join" ? "You" : "P2");
+        ctx.globalAlpha = 1;
+    }
+
+    if (MODE === "single") scoreDiv.innerText = `SCORE: ${p1.score}`;
+    else scoreDiv.innerText = `P1: ${p1.score} | P2: ${p2.score}`;
+}
+
+setInterval(update, 1000/60);
+function loop() { draw(); requestAnimationFrame(loop); }
+loop();
+
+const holistic = new Holistic({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${f}` });
+holistic.setOptions({ modelComplexity: 1, smoothLandmarks: true });
+
+holistic.onResults((results) => {
+    if (gameState === "LOADING") {
+        loadingDiv.style.display = "none";
+        gameState = "WAIT";
+        if (MODE === "single") msgDiv.innerText = "吐舌頭 或 按鈕開始";
+        if (MODE !== 'single') initNetwork();
+    }
+
+    if (MODE !== "spectate" && results.faceLandmarks) {
+        const up = results.faceLandmarks[13];
+        const low = results.faceLandmarks[14];
+        isTongueOut = Math.abs(low.y - up.y) > TONGUE_THRESHOLD;
+
+        if (gameState === "WAIT" && isTongueOut) {
+            if (MODE === "single") startGameLocal();
+            else if (MODE === "host") triggerStartGame();
+        }
+    }
+});
+
+const videoElement = document.getElementById("input_video");
+const camera = new Camera(videoElement, {
+    onFrame: async () => { await holistic.send({ image: videoElement }); },
+    width: 640, height: 480
+});
+camera.start();
+
+</script>
+</body>
+</html>
+

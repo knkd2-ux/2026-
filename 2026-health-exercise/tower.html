@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>大岩壁</title>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+
+  <style>
+    body {
+      margin: 0;
+      background: #000; /* 真正背景是鏡頭畫面 */
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+    canvas { display: block; width: 100vw; height: 100vh; }
+
+    .hud {
+      position: absolute;
+      color: white;
+      font-weight: bold;
+      pointer-events: none;
+      text-shadow: 2px 2px 0 #000;
+      z-index: 20;
+    }
+    #p1-score { top: 20px; left: 20px; font-size: 30px; color: yellow; }
+    #p2-score { top: 20px; right: 20px; font-size: 30px; color: cyan; }
+    #status   { top: 20px; left: 50%; transform: translateX(-50%); font-size: 20px; color: #ddd; }
+    #debug-log {
+      bottom: 10px; left: 10px; font-size: 14px;
+      color: #0f0; background: rgba(0,0,0,0.5);
+      pointer-events: none;
+    }
+
+    #jump-hint {
+      position: absolute;
+      bottom: 150px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 50px;
+      color: yellow;
+      font-weight: bold;
+      text-shadow: 0 0 10px red;
+      display: none;
+      z-index: 30;
+    }
+
+    #overlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      display: flex; flex-direction: column; justify-content: center;
+      align-items: center; background: rgba(0,0,0,0.85); z-index: 50;
+    }
+
+    #input_video {
+      position: absolute;
+      opacity: 0;          /* 隱藏，但仍供 Camera / drawImage 使用 */
+      pointer-events: none;
+      width: 1px;
+      height: 1px;
+    }
+
+    #start-btn {
+      display: none;
+      margin-top: 20px; padding: 15px 40px; font-size: 24px;
+      background: lime; color: black; border: none; border-radius: 50px;
+      cursor: pointer; font-weight: bold; pointer-events: auto;
+    }
+
+    .spectator-ui {
+      display: none;
+      position: absolute; bottom: 20px; width: 100%;
+      justify-content: space-between; padding: 0 10%;
+      box-sizing: border-box; pointer-events: none; z-index: 15;
+    }
+    .player-cam {
+      width: 240px; height: 180px;
+      background: black; border: 4px solid white;
+      border-radius: 10px; overflow: hidden; position: relative;
+    }
+    .player-cam img {
+      width: 100%; height: 100%;
+      object-fit: cover; transform: scaleX(-1);
+    }
+    .cam-label {
+      position: absolute; bottom: 0; width: 100%;
+      background: rgba(0,0,0,0.6);
+      color: white; text-align: center; font-size: 16px; padding: 2px 0;
+    }
+  </style>
+</head>
+
+<body>
+  <video id="input_video" autoplay playsinline></video>
+  <canvas id="output_canvas"></canvas>
+
+  <div id="p1-score" class="hud">P1: 0</div>
+  <div id="p2-score" class="hud">P2: 0</div>
+  <div id="status"   class="hud">初始化...</div>
+  <div id="debug-log" class="hud">Log...</div>
+  <div id="jump-hint" class="hud">JUMP!</div>
+
+  <div id="spectator-panel" class="spectator-ui">
+    <div class="player-cam" style="border-color:yellow">
+      <img id="img-p1">
+      <div class="cam-label">P1 (房主)</div>
+    </div>
+    <div class="player-cam" style="border-color:cyan">
+      <img id="img-p2">
+      <div class="cam-label">P2 (對手)</div>
+    </div>
+  </div>
+
+  <div id="overlay">
+    <h1 style="font-size: 50px; color: white;">大岩壁</h1>
+    <div id="msg" class="blink" style="font-size: 30px; margin-top: 20px; color:white;">等待連線...</div>
+    <button id="start-btn" onclick="forceStartGame()">👉 開始遊戲 👈</button>
+    <div id="loading" style="font-size: 22px; margin-top: 20px; color: #ccc;">姿態偵測載入中...</div>
+    <div id="final-score" style="display:none; font-size: 40px; margin-top: 20px; color: cyan; text-align: center; white-space: pre;"></div>
+  </div>
+
+<script>
+  // ===== 常數 =====
+  const GRAVITY       = 1500.0;
+  const ROPE_AMP      = 220.0;
+  const ROPE_SPEED    = 0.9;
+  const ROPE_SAG      = 120;
+  const BLOCK_HEIGHT  = 80;
+  const INIT_BLOCK_WIDTH = 240;
+  const SUCCESS_RATIO = 0.5;
+  const JUMP_THRESHOLD = 0.05;
+  const DEBOUNCE_SEC   = 0.8;
+  const STABLE_FRAMES_NEEDED = 30;
+
+  const canvas       = document.getElementById('output_canvas');
+  const ctx          = canvas.getContext('2d');
+  const overlay      = document.getElementById('overlay');
+  const msgDiv       = document.getElementById('msg');
+  const startBtn     = document.getElementById('start-btn');
+  const loadingDiv   = document.getElementById('loading');
+  const p1ScoreDiv   = document.getElementById('p1-score');
+  const p2ScoreDiv   = document.getElementById('p2-score');
+  const statusDiv    = document.getElementById('status');
+  const debugLog     = document.getElementById('debug-log');
+  const jumpHint     = document.getElementById('jump-hint');
+  const finalScoreDiv= document.getElementById('final-score');
+  const spectatorPanel = document.getElementById('spectator-panel');
+  const imgP1        = document.getElementById('img-p1');
+  const imgP2        = document.getElementById('img-p2');
+  const videoElement = document.getElementById('input_video');
+
+  function log(txt){ console.log(txt); debugLog.innerText = txt; }
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const MODE = urlParams.get('mode') || 'single';   // single / host / join / spectate
+  const PIN  = urlParams.get('pin');
+
+  let width, height;
+  function resize(){
+    width = innerWidth;
+    height = innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  statusDiv.innerText = `模式: ${MODE.toUpperCase()} | PIN: ${PIN || '-'}`;
+  if (MODE === 'spectate') spectatorPanel.style.display = 'flex';
+
+  let gameState = 'LOADING';   // LOADING -> WAIT -> PLAY / OVER
+  let lastTime  = Date.now();
+
+  // 跳躍偵測相關
+  let lastY = null;
+  let lastJumpTime = 0;
+  let stableFrames = 0;
+
+  // ===== 玩家狀態 =====
+  function createPlayerState(w, h){
+    const groundY = h * 0.65;
+    return {
+      blocks: [{
+        x: w/2,
+        y: groundY - BLOCK_HEIGHT,
+        w: INIT_BLOCK_WIDTH,
+        h: BLOCK_HEIGHT,
+        color: [230,230,230]
+      }],
+      hanging: {
+        x: w/2,
+        y: 100,
+        w: INIT_BLOCK_WIDTH,
+        h: BLOCK_HEIGHT,
+        falling: false,
+        vy: 0,
+        color: [220,220,220]
+      },
+      ropeIntact: true,
+      swingStart: Date.now(),
+      cameraOffset: 0,
+      score: 0,
+      gameOver: false,
+      anchorY: 40,
+      width: w,
+      height: h
+    };
+  }
+
+  let localGame = null;   // 自己這一邊
+  let p1State   = null;   // 觀戰模式用
+  let p2State   = null;
+  let p1Dead    = false;
+  let p2Dead    = false;
+  let opponentScore = 0;
+
+  // ===== WebSocket =====
+  let ws = null;
+  let networkInited = false;
+
+  function initNetwork(){
+    if (MODE === 'single') {
+      // 單機模式不連線
+      msgDiv.innerText = '請跳躍 或 按鈕開始';
+      startBtn.style.display = 'block';
+      gameState = 'WAIT';
+      if (!localGame) localGame = createPlayerState(width, height);
+      return;
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const host = window.location.host;
+    const wsUrl = `${protocol}${host}/ws`;
+
+    log(`連線 Server: ${wsUrl}`);
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      log('伺服器連線成功！');
+      ws.send(JSON.stringify({ type: 'JOIN', pin: PIN, mode: MODE }));
+
+      if (MODE === 'host') {
+        msgDiv.innerText = '等待 P2 加入...';
+        msgDiv.style.color = 'yellow';
+        setInterval(() => {
+          if (gameState === 'WAIT') sendData({ type: 'LOBBY_HEARTBEAT' });
+        }, 1000);
+      } else {
+        msgDiv.innerText = '已連線，等待房主...';
+        msgDiv.style.color = 'cyan';
+        gameState = 'WAIT';
+      }
+    };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.type === 'PLAYER_JOINED') {
+        msgDiv.innerText = 'P2 已加入！請跳躍開始';
+        msgDiv.style.color = 'lime';
+        if (MODE === 'host') startBtn.style.display = 'block';
+      }
+
+      if (data.type === 'START') {
+        initGameLocal();
+        gameState = 'PLAY';
+        overlay.style.display = 'none';
+        finalScoreDiv.style.display = 'none';
+      }
+
+      if (data.type === 'UPDATE') {
+        if (gameState === 'WAIT' && MODE !== 'host' && data.gameRunning) {
+          initGameLocal();
+          gameState = 'PLAY';
+          overlay.style.display = 'none';
+        }
+
+        if (MODE === 'host') {
+          opponentScore = data.p2_score || 0;
+          p2Dead = data.p2_dead;
+          p2State = data.p2_state;
+          if (data.p2_face) {
+            imgP2.src = data.p2_face;
+          }
+          if (localGame && localGame.gameOver && p2Dead) {
+            sendData({ type: 'GAME_OVER' });
+            showGameOver();
+          }
+        } else if (MODE === 'join') {
+          opponentScore = data.p1_score || 0;
+          p1Dead = data.p1_dead;
+        } else if (MODE === 'spectate') {
+          p1State = data.p1_state;
+          p2State = data.p2_state;
+          if (data.p1_face) imgP1.src = data.p1_face;
+          if (data.p2_face) imgP2.src = data.p2_face;
+
+          if (gameState !== 'PLAY' && data.gameRunning) {
+            gameState = 'PLAY';
+            overlay.style.display = 'none';
+          }
+        }
+      }
+
+      if (data.type === 'GAME_OVER') {
+        showGameOver();
+      }
+    };
+
+    ws.onclose = () => { log('斷線'); alert('連線中斷'); };
+  }
+
+  function sendData(obj){
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  }
+
+  function compressImage(videoElem){
+    const c = document.createElement('canvas');
+    c.width = 100; c.height = 75;
+    c.getContext('2d').drawImage(videoElem, 0, 0, 100, 75);
+    return c.toDataURL('image/jpeg', 0.4);
+  }
+
+  function forceStartGame(){
+    if (MODE === 'single' || MODE === 'host') {
+      if (MODE !== 'single') sendData({ type: 'START' });
+      initGameLocal();
+      gameState = 'PLAY';
+      overlay.style.display = 'none';
+      finalScoreDiv.style.display = 'none';
+    }
+  }
+
+  function initGameLocal(){
+    localGame = createPlayerState(width, height);
+    p1Dead = false;
+    p2Dead = false;
+    lastTime = Date.now();
+  }
+
+  // ===== 物理解算 =====
+  function computeRopeControl(state, centerX){
+    const t = (Date.now() - state.swingStart) / 1000;
+    const swing = Math.sin(t * ROPE_SPEED);
+    return {
+      x: centerX + swing * ROPE_AMP,
+      y: state.anchorY + ROPE_SAG
+    };
+  }
+
+  function updatePlayerLogic(dt, state){
+    if (!state || state.gameOver) return;
+
+    if (state.blocks.length > 0) {
+      const highestY = Math.min(...state.blocks.map(b => b.y));
+      state.anchorY = highestY - 200;
+      const desired = -(state.anchorY - height * 0.25);
+      state.cameraOffset += (desired - state.cameraOffset) * 6.0 * dt;
+      state.anchorY = -state.cameraOffset + 80;
+    }
+
+    if (state.hanging.falling) {
+      state.hanging.vy += GRAVITY * dt;
+      state.hanging.y += state.hanging.vy * dt;
+
+      const top = state.blocks[state.blocks.length - 1];
+      const targetY = top.y - state.hanging.h - 8;
+
+      if (state.hanging.y >= targetY) {
+        state.hanging.y = targetY;
+        state.hanging.falling = false;
+
+        const overlapLeft  = Math.max(state.hanging.x - state.hanging.w/2, top.x - top.w/2);
+        const overlapRight = Math.min(state.hanging.x + state.hanging.w/2, top.x + top.w/2);
+        const overlapW     = Math.max(0, overlapRight - overlapLeft);
+
+        if (overlapW >= SUCCESS_RATIO * state.hanging.w) {
+          const newCenter = (overlapLeft + overlapRight) / 2;
+          state.blocks.push({
+            x: newCenter,
+            y: targetY,
+            w: overlapW,
+            h: state.hanging.h,
+            color: state.hanging.color
+          });
+          state.score++;
+
+          state.hanging = {
+            x: state.width / 2,
+            y: state.anchorY + ROPE_SAG,
+            w: overlapW,
+            h: BLOCK_HEIGHT,
+            falling: false,
+            vy: 0,
+            color: [220,220,220]
+          };
+          state.ropeIntact = true;
+          state.swingStart = Date.now();
+        } else {
+          state.gameOver = true;
+          waitOtherPlayer();
+        }
+      }
+    } else {
+      const control = computeRopeControl(state, state.width / 2);
+      const diff    = control.x - state.hanging.x;
+      state.hanging.x += diff * Math.min(1.0, dt * 6.0);
+
+      const top = state.blocks[state.blocks.length - 1];
+      const minY = top.y - state.hanging.h - 25;
+      state.hanging.y = Math.min(control.y, minY);
+    }
+  }
+
+  function waitOtherPlayer(){
+    if (MODE === 'single') { showGameOver(); return; }
+    overlay.style.display = 'flex';
+    msgDiv.innerText = '你失敗了！等待對手...';
+    msgDiv.style.color = 'red';
+    startBtn.style.display = 'none';
+    loadingDiv.style.display = 'none';
+  }
+
+  function showGameOver(){
+    overlay.style.display = 'flex';
+    msgDiv.innerText = '全體遊戲結束！';
+    msgDiv.style.color = 'yellow';
+    finalScoreDiv.style.display = 'block';
+    startBtn.style.display = 'none';
+    loadingDiv.style.display = 'none';
+
+    let s1 = (MODE === 'host' ? (localGame ? localGame.score : 0) : opponentScore);
+    let s2 = (MODE === 'join' ? (localGame ? localGame.score : 0) : opponentScore);
+
+    if (MODE === 'spectate') {
+      s1 = p1State && typeof p1State.score === 'number' ? p1State.score : 0;
+      s2 = p2State && typeof p2State.score === 'number' ? p2State.score : 0;
+    }
+
+    let result = '';
+    if (MODE !== 'single') {
+      if (s1 > s2) result = 'P1 獲勝！';
+      else if (s2 > s1) result = 'P2 獲勝！';
+      else result = '平手！';
+      finalScoreDiv.innerText = `${result}\nP1: ${s1} | P2: ${s2}`;
+    } else {
+      finalScoreDiv.innerText = `分數: ${localGame ? localGame.score : 0}`;
+    }
+
+    setTimeout(() => {
+      msgDiv.innerText = '按鈕重來';
+      msgDiv.style.color = 'lime';
+      if (MODE === 'host' || MODE === 'single') startBtn.style.display = 'block';
+      gameState = 'WAIT';
+    }, 3000);
+  }
+
+  // ===== House 風格 =====
+  function drawHouse(ctx, b, offsetY){
+    const bodyWidth  = b.w;
+    const bodyHeight = b.h * 0.7;
+    const roofHeight = b.h * 0.8;
+
+    const bodyX = b.x - bodyWidth / 2;
+    const bodyY = b.y + offsetY;
+
+    // 本體
+    ctx.fillStyle = `rgb(${b.color[0]},${b.color[1]},${b.color[2]})`;
+    ctx.fillRect(bodyX, bodyY, bodyWidth, bodyHeight);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#111827';
+    ctx.strokeRect(bodyX, bodyY, bodyWidth, bodyHeight);
+
+    // 屋頂
+    ctx.beginPath();
+    ctx.moveTo(b.x, bodyY - roofHeight * 0.5);
+    ctx.lineTo(bodyX - 5, bodyY);
+    ctx.lineTo(bodyX + bodyWidth + 5, bodyY);
+    ctx.closePath();
+    ctx.fillStyle = '#b91c1c';
+    ctx.fill();
+    ctx.strokeStyle = '#7f1d1d';
+    ctx.stroke();
+
+    // 門
+    const doorWidth  = bodyWidth * 0.18;
+    const doorHeight = bodyHeight * 0.55;
+    const doorX = b.x - doorWidth * 0.5;
+    const doorY = bodyY + bodyHeight - doorHeight;
+    ctx.fillStyle = '#4b5563';
+    ctx.fillRect(doorX, doorY, doorWidth, doorHeight);
+    ctx.strokeStyle = '#111827';
+    ctx.strokeRect(doorX, doorY, doorWidth, doorHeight);
+    ctx.beginPath();
+    ctx.arc(doorX + doorWidth * 0.8, doorY + doorHeight * 0.55, 2, 0, Math.PI * 2);
+    ctx.fillStyle = '#e5e7eb';
+    ctx.fill();
+
+    // 窗戶
+    const winSize = bodyWidth * 0.18;
+    const winY    = bodyY + bodyHeight * 0.25;
+    const winX1   = bodyX + bodyWidth * 0.22;
+    const winX2   = bodyX + bodyWidth * 0.6;
+    ctx.fillStyle   = '#bfdbfe';
+    ctx.strokeStyle = '#1d4ed8';
+    ctx.lineWidth   = 2;
+
+    ctx.fillRect(winX1, winY, winSize, winSize);
+    ctx.strokeRect(winX1, winY, winSize, winSize);
+
+    ctx.fillRect(winX2, winY, winSize, winSize);
+    ctx.strokeRect(winX2, winY, winSize, winSize);
+  }
+
+  // ===== 單一玩家畫面（自動水平置中） =====
+  function drawPlayerView(ctx, state, label, targetCenterX){
+    if (!state) return;
+
+    const worldCenter = state.width / 2;
+    const shiftX = targetCenterX - worldCenter;
+
+    ctx.save();
+    ctx.translate(shiftX, 0);
+
+    // 地面：疊在鏡頭上，不是整個藍底
+    const groundY = state.height * 0.65 + state.cameraOffset;
+    ctx.fillStyle = 'rgba(15,23,42,0.7)';
+    ctx.fillRect(-2000, groundY, state.width + 4000, state.height - groundY);
+
+    // 繩子（左右錨點）
+    const control = computeRopeControl(state, worldCenter);
+    if (state.ropeIntact) {
+      const ropeY = state.anchorY + state.cameraOffset;
+      ctx.strokeStyle = '#5a5a5a';
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.moveTo(80, ropeY);
+      ctx.quadraticCurveTo(control.x, control.y + state.cameraOffset, state.width - 80, ropeY);
+      ctx.stroke();
+    }
+
+    // 已疊好的房子 + 吊掛中的方塊
+    const allBlocks = [...state.blocks];
+    if (state.hanging) allBlocks.push(state.hanging);
+    allBlocks.forEach(b => drawHouse(ctx, b, state.cameraOffset));
+
+    // 吊掛方塊連繩子
+    if (state.hanging && state.ropeIntact && !state.hanging.falling) {
+      const bx = state.hanging.x;
+      const by = state.hanging.y + state.cameraOffset;
+      ctx.strokeStyle = '#5a5a5a';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(bx, control.y + state.cameraOffset);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+    }
+
+    // Game Over 遮罩
+    if (state.gameOver) {
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(0, 0, state.width, state.height);
+      ctx.fillStyle = 'red';
+      ctx.font = 'bold 60px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('FAIL', state.width / 2, state.height / 2);
+    }
+
+    ctx.restore();
+  }
+
+  // ===== 主繪製 =====
+  function draw(){
+    ctx.clearRect(0, 0, width, height);
+
+    // 先畫鏡頭畫面做背景（所有模式）
+    ctx.save();
+    ctx.translate(width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(videoElement, 0, 0, width, height);
+    ctx.restore();
+
+    // --- 觀戰模式 ---
+    if (MODE === 'spectate') {
+      if (!p1State && !p2State) return;
+
+      // P1 左半
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, width/2, height);
+      ctx.clip();
+      drawPlayerView(ctx, p1State, 'P1', width/4);
+      ctx.restore();
+
+      // 中線
+      ctx.fillStyle = 'white';
+      ctx.fillRect(width/2 - 2, 0, 4, height);
+
+      // P2 右半
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(width/2, 0, width/2, height);
+      ctx.clip();
+      drawPlayerView(ctx, p2State, 'P2', 3*width/4);
+      ctx.restore();
+
+      const p1ScoreSafe = p1State && typeof p1State.score === 'number' ? p1State.score : 0;
+      const p2ScoreSafe = p2State && typeof p2State.score === 'number' ? p2State.score : 0;
+      p1ScoreDiv.innerText = `P1: ${p1ScoreSafe}`;
+      p2ScoreDiv.innerText = `P2: ${p2ScoreSafe}`;
+      return;
+    }
+
+    // --- 玩家模式 (single / host / join) ---
+    if (!localGame) return; // 還沒初始化就先不畫
+
+    drawPlayerView(ctx, localGame, (MODE === 'host' ? 'P1' : 'P2'), width/2);
+
+    const myScore = typeof localGame.score === 'number' ? localGame.score : 0;
+
+    if (MODE === 'host') {
+      p1ScoreDiv.innerText = `P1: ${myScore}`;
+      p2ScoreDiv.innerText = `P2: ${opponentScore || 0}`;
+    } else if (MODE === 'join') {
+      p1ScoreDiv.innerText = `P1: ${opponentScore || 0}`;
+      p2ScoreDiv.innerText = `P2: ${myScore}`;
+    } else { // single
+      p1ScoreDiv.innerText = `Score: ${myScore}`;
+      p2ScoreDiv.innerText = '';
+    }
+  }
+
+  // ===== 主迴圈 =====
+  function gameLoop(){
+    const now = Date.now();
+    const dt  = Math.min((now - lastTime) / 1000, 0.1);
+    lastTime = now;
+
+    if (gameState === 'PLAY') {
+      if (MODE !== 'spectate' && localGame && !localGame.gameOver) {
+        updatePlayerLogic(dt, localGame);
+      }
+      draw();
+
+      if (Date.now() % 3 === 0 && MODE !== 'single') {
+        const face = (videoElement.readyState >= 2) ? compressImage(videoElement) : '';
+        if (MODE === 'host') {
+          sendData({
+            type: 'UPDATE',
+            p1_state: localGame,
+            p1_face: face,
+            p1_dead: localGame.gameOver,
+            gameRunning: true,
+            p2_state: p2State,
+            p2_face: imgP2.src,
+            p2_dead: p2Dead
+          });
+        } else if (MODE === 'join') {
+          sendData({
+            type: 'UPDATE',
+            p2_state: localGame,
+            p2_face: face,
+            p2_dead: localGame.gameOver
+          });
+        }
+      }
+    } else {
+      // WAIT / LOADING 時也畫背景 + 已有的 tower（如果有）
+      draw();
+    }
+
+    requestAnimationFrame(gameLoop);
+  }
+  gameLoop();
+
+  // ===== MediaPipe Holistic + 跳躍偵測 =====
+  const holistic = new Holistic({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`,
+  });
+
+  holistic.setOptions({
+    modelComplexity: 1,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+    smoothLandmarks: true,
+  });
+
+  holistic.onResults((results) => {
+    if (gameState === 'LOADING') {
+      loadingDiv.style.display = 'none';
+      gameState = 'WAIT';
+
+      if (MODE === 'single') {
+        msgDiv.innerText = '請跳躍 或 按鈕開始';
+        if (!localGame) localGame = createPlayerState(width, height);
+      } else {
+        if (!networkInited) {
+          initNetwork();
+          networkInited = true;
+        }
+      }
+    }
+
+    if (!results.poseLandmarks) return;
+
+    const leftHip  = results.poseLandmarks[23];
+    const rightHip = results.poseLandmarks[24];
+    if (!leftHip || !rightHip) return;
+
+    const currentY = (leftHip.y + rightHip.y) / 2;
+
+    if (lastY !== null) {
+      stableFrames++;
+      const diff = lastY - currentY; // 向上跳 → diff > 0
+
+      if (stableFrames > STABLE_FRAMES_NEEDED && diff > JUMP_THRESHOLD) {
+        const nowSec = Date.now() / 1000;
+        if (nowSec - lastJumpTime > DEBOUNCE_SEC) {
+          jumpHint.style.display = 'block';
+          setTimeout(() => jumpHint.style.display = 'none', 500);
+
+          if (gameState === 'WAIT') {
+            if (MODE === 'single' || MODE === 'host') {
+              forceStartGame();
+            }
+          } else if (
+            gameState === 'PLAY' &&
+            localGame &&
+            localGame.ropeIntact &&
+            !localGame.gameOver
+          ) {
+            localGame.ropeIntact = false;
+            localGame.hanging.falling = true;
+            localGame.hanging.vy = 0;
+          }
+
+          lastJumpTime = nowSec;
+        }
+      }
+    } else {
+      stableFrames = 0;
+    }
+
+    lastY = currentY;
+  });
+
+  // 啟動 Camera（會觸發瀏覽器要求鏡頭權限）
+  const camera = new Camera(videoElement, {
+    onFrame: async () => {
+      await holistic.send({ image: videoElement });
+    },
+    width: 640,
+    height: 480,
+  });
+  camera.start();
+</script>
+</body>
+</html>
+
